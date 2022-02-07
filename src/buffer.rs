@@ -15,8 +15,9 @@ use crossterm::{
 use std::{fs, 
     path::PathBuf,
     io::Write, process};
+use crate::command::{Command, Movement};
 
-enum EditMode {
+pub enum EditMode {
     Normal,
     Insert,
     Command,
@@ -28,17 +29,6 @@ impl Default for EditMode {
     }
 }
 
-enum MovementType {
-    Up(usize),
-    Down(usize),
-    Left(usize),
-    Right(usize),
-    Home,
-    End,
-    FirstChar,
-    //    NextWord,
-    //    PrevWord,
-}
 
 #[derive(Default)]
 pub struct Buffer {
@@ -91,7 +81,7 @@ impl Buffer {
             tab_size: 4,
             ..Buffer::default()
         }
-    }
+}
 
     fn set_mode<W: Write>(&mut self, w: &mut W, mode: EditMode) -> Result<()> {
         match mode {
@@ -104,21 +94,10 @@ impl Buffer {
     }
 
     pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
-        match key_event.code {
-            KeyCode::Up => self.move_cursor(MovementType::Up(1)),
-            KeyCode::Down => self.move_cursor(MovementType::Down(1)),
-            KeyCode::Left => self.move_cursor(MovementType::Left(1)),
-            KeyCode::Right => self.move_cursor(MovementType::Right(1)),
-            KeyCode::Home => self.move_cursor(MovementType::Home),
-            KeyCode::End => self.move_cursor(MovementType::End),
-            KeyCode::PageUp => self.move_cursor(MovementType::Up(self.height / 2)),
-            KeyCode::PageDown => self.move_cursor(MovementType::Down(self.height / 2)),
-            KeyCode::Delete => self.delete(0),
-            _ => match self.mode {
-                EditMode::Normal => self.handle_keyevent_normal(w, key_event)?,
-                EditMode::Insert => self.handle_keyevent_insert(w, key_event)?,
-                EditMode::Command => self.handle_keyevent_command(w, key_event)?,
-            },
+        match self.mode {
+            EditMode::Normal => self.handle_keyevent_normal(w, key_event)?,
+            EditMode::Insert => self.handle_keyevent_insert(w, key_event)?,
+            EditMode::Command => self.handle_keyevent_command(w, key_event)?,
         }
         self.update_cursor(w)?;
         Ok(())
@@ -130,42 +109,45 @@ impl Buffer {
         key_event: KeyEvent,
     ) -> Result<()> {
         match key_event.code {
-            KeyCode::Char('i') => {
-                self.set_mode(w, EditMode::Insert)?;
-            }
+            KeyCode::Char('i') => self.set_mode(w, EditMode::Insert)?,
             KeyCode::Char('I') => {
                 self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(MovementType::FirstChar);
+                self.move_cursor(Movement::FirstChar);
             }
             KeyCode::Char('a') => {
                 self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(MovementType::Right(1));
+                self.move_cursor(Movement::Right(1));
             }
             KeyCode::Char('A') => {
                 self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(MovementType::End);
+                self.move_cursor(Movement::End);
             }
             KeyCode::Char('x') => self.delete(0),
             KeyCode::Char('o') => {
                 self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(MovementType::End);
+                self.move_cursor(Movement::End);
                 self.new_line();
-                self.move_cursor(MovementType::Down(1));
-                self.move_cursor(MovementType::Home);
+                self.move_cursor(Movement::Down(1));
+                self.move_cursor(Movement::Home);
             }
             KeyCode::Char('O') => {
                 self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(MovementType::Home);
+                self.move_cursor(Movement::Home);
                 self.new_line();
             }
-            KeyCode::Esc => {
-                self.status.clear();
-            }
+            KeyCode::Esc => self.status.clear(),
             KeyCode::Char(':') => {
                 self.set_mode(w, EditMode::Command)?;
                 self.status = String::from(":");
             }
             KeyCode::Char(c) => self.status.push(c),
+            KeyCode::Up => self.status.push('k'),
+            KeyCode::Down => self.status.push('j'),
+            KeyCode::Left => self.status.push('h'),
+            KeyCode::Right => self.status.push('l'),
+            KeyCode::Home => self.status.push('0'),
+            KeyCode::End => self.status.push('$'),
+            KeyCode::Delete => self.status.push('x'),
             _ => (),
         }
         Ok(())
@@ -175,15 +157,24 @@ impl Buffer {
         match key_event.code {
             KeyCode::Esc => {
                 self.set_mode(w, EditMode::Normal)?;
-                self.move_cursor(MovementType::Left(1));
+                self.move_cursor(Movement::Left(1));
             }
+            KeyCode::Up => self.move_cursor(Movement::Up(1)),
+            KeyCode::Down => self.move_cursor(Movement::Down(1)),
+            KeyCode::Left => self.move_cursor(Movement::Left(1)),
+            KeyCode::Right => self.move_cursor(Movement::Right(1)),
+            KeyCode::Home => self.move_cursor(Movement::Home),
+            KeyCode::End => self.move_cursor(Movement::End),
+            KeyCode::PageUp => self.move_cursor(Movement::Up(self.height / 2)),
+            KeyCode::PageDown => self.move_cursor(Movement::Down(self.height / 2)),
             KeyCode::Char(c) => self.insert(c),
             KeyCode::Backspace => self.delete(-1),
+            KeyCode::Delete => self.delete(0),
             KeyCode::Tab => self.insert_tab(),
             KeyCode::Enter => {
                 self.new_line();
-                self.move_cursor(MovementType::Down(1));
-                self.move_cursor(MovementType::Home);
+                self.move_cursor(Movement::Down(1));
+                self.move_cursor(Movement::Home);
             }
             _ => (),
         }
@@ -209,23 +200,33 @@ impl Buffer {
     }
 
     fn execute_command<W: Write>(&mut self, w: &mut W) -> Result<()> {
-        match self.status.as_str() {
-            ":w" => self.save()?,
-            ":q" => if !self.edited {
-                    self.quit(w)?
-                } else {
-                    self.status = String::from("Error: No write since last change. To quit without saving, use ':q!'")
+        let (command, argument) = self.status.as_str().split_at(1);
+        match command {
+            ":" => match argument {
+                "w" => self.save()?,
+                "q" => if !self.edited {
+                        self.quit(w)?
+                    } else {
+                        self.status = String::from("Error: No write since last change. To quit without saving, use ':q!'")
+                    }
+                "q!" => self.quit(w)?,
+                "wq" | "x" => {
+                    self.save()?;
+                    self.quit(w)?;
                 }
-            ":q!" => self.quit(w)?,
-            ":wq" => {
-                self.save()?;
-                self.quit(w)?;
+                _ => self.status = format!("Error: invalid argument ({}) for command ({})", argument, command),
             }
-            _ => (),
+            _ => {
+                for com in Command::parse(&self.status) {
+                    match com {
+                        
+                    }
+                }
+            }
         }
         Ok(())
     }
-    
+
     fn save(&mut self) -> Result<()> {
         fs::write(&self.path, self.content.join("\n").as_bytes())?;
         self.status = format!("\"{}\" {}L written", self.path.to_str().unwrap(), self.content.len());
@@ -327,7 +328,7 @@ impl Buffer {
                 return;
             }
             self.row -= 1;
-            self.move_cursor(MovementType::End);
+            self.move_cursor(Movement::End);
             let row = self.content[self.row + 1].clone();
             self.content[self.row].push_str(row.as_str());
             self.content.remove(self.row + 1);
@@ -386,50 +387,65 @@ impl Buffer {
         }
     }
 
-    fn move_cursor(&mut self, movement_type: MovementType) {
+    fn move_cursor(&mut self, movement_type: Movement) {
         match movement_type {
-            MovementType::Up(amount) => {
+            Movement::Up(amount) => {
                 self.row = self.row.saturating_sub(amount);
                 self.restore_saved_col();
                 self.clamp_cursor_top(3);
                 self.clamp_cursor_left(5);
                 self.clamp_cursor_right(5);
             }
-            MovementType::Down(amount) => {
+            Movement::Down(amount) => {
                 self.row = usize::min(self.row + amount, self.content.len().saturating_sub(1));
                 self.restore_saved_col();
                 self.clamp_cursor_bottom(3);
                 self.clamp_cursor_left(5);
                 self.clamp_cursor_right(5);
             }
-            MovementType::Left(amount) => {
+            Movement::Left(amount) => {
                 self.col = self.col.saturating_sub(amount);
                 self.saved_col = self.col;
                 self.clamp_cursor_left(5);
             }
-            MovementType::Right(amount) => {
+            Movement::Right(amount) => {
                 self.col = usize::min(self.col + amount, self.max_col());
                 self.saved_col = self.col;
                 self.clamp_cursor_right(5);
             }
-            MovementType::Home => {
+            Movement::Home => {
                 self.col = 0;
                 self.saved_col = 0;
                 // No clamping needed, because we already know the offset will be 0.
                 self.col_offset = 0;
             }
-            MovementType::End => {
+            Movement::End => {
                 self.col = self.max_col();
                 self.saved_col = self.col;
                 self.clamp_cursor_right(5);
             }
-            MovementType::FirstChar => {
+            Movement::FirstChar => {
                 let index = self.content[self.row]
                     .find(|c| !char::is_whitespace(c))
                     .unwrap_or(0);
                 self.col = index;
                 self.clamp_cursor_left(5);
             }
+            Movement::Top => {
+                self.row = self.col_offset + 3;
+                self.restore_saved_col();
+            }
+            Movement::Bottom => {
+                self.row = self.col_offset + self.height - 3;
+                self.restore_saved_col();
+            }
+            Movement::NextWord(_amount) => {
+                unimplemented!();
+            }
+            Movement::PrevWord(_amount) => {
+                unimplemented!();
+            }
+
         }
     }
 

@@ -14,6 +14,7 @@ use std::{
 };
 
 mod buffer;
+mod command;
 
 fn main() {
     run(&mut io::stderr()).unwrap();
