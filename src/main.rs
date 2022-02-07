@@ -9,15 +9,15 @@ use crossterm::{
 };
 use std::{
     env,
-    path::PathBuf,
     io::{self, Write},
+    path::PathBuf,
 };
 
 mod buffer;
 mod command;
 
 fn main() {
-    run(&mut io::stderr()).unwrap();
+    run(&mut io::stdout()).unwrap();
 }
 
 struct CleanUp;

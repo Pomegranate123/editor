@@ -1,21 +1,16 @@
+use crate::command::{Command, Movement, Selection};
 use crossterm::{
     cursor::{
         CursorShape, Hide, MoveLeft, MoveTo, MoveToNextLine, RestorePosition, SavePosition,
         SetCursorShape, Show,
     },
-    event::{KeyCode, KeyEvent, DisableMouseCapture},
+    event::{DisableMouseCapture, KeyCode, KeyEvent},
     execute, queue,
     style::Print,
-    terminal::{self, Clear, ClearType,
-            LeaveAlternateScreen,
-            EnableLineWrap
-    },
+    terminal::{self, Clear, ClearType, EnableLineWrap, LeaveAlternateScreen},
     Result,
 };
-use std::{fs, 
-    path::PathBuf,
-    io::Write, process};
-use crate::command::{Command, Movement};
+use std::{fs, io::Write, path::PathBuf, process};
 
 pub enum EditMode {
     Normal,
@@ -29,6 +24,44 @@ impl Default for EditMode {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Pos {
+    pub y: usize,
+    pub x: usize,
+}
+
+impl Pos {
+    pub fn new(x: usize, y: usize) -> Self {
+        Self { x, y }
+    }
+}
+
+impl Default for Pos {
+    fn default() -> Self {
+        Self { x: 0, y: 0 }
+    }
+}
+
+struct Bounds {
+    pub left: Pos,
+    pub right: Pos,
+}
+
+impl Bounds {
+    pub fn new(pos1: Pos, pos2: Pos) -> Self {
+        if pos1 < pos2 {
+            Self {
+                left: pos1,
+                right: pos2,
+            }
+        } else {
+            Self {
+                left: pos2,
+                right: pos1,
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Buffer {
@@ -38,20 +71,18 @@ pub struct Buffer {
     path: PathBuf,
     /// The mode the buffer is currently being edited in
     mode: EditMode,
+    /// The current command buffer
+    command: String,
     /// The contents of the bottom statusline
     status: String,
     /// Whether the buffer has been edited since saving
     pub edited: bool,
-    /// The amount of lines scrolled down
-    row_offset: usize,
-    /// The amount of column scrolled to the side
-    col_offset: usize,
     /// Saved column index for easier traversal
     saved_col: usize,
-    /// Row index in `content` vector
-    row: usize,
-    /// Column index in row
-    col: usize,
+    ///
+    offset: Pos,
+    /// Position of cursor in buffer
+    pos: Pos,
     /// The width the buffer gets to render
     pub width: usize,
     /// The height the buffer gets to render
@@ -81,13 +112,14 @@ impl Buffer {
             tab_size: 4,
             ..Buffer::default()
         }
-}
+    }
+
 
     fn set_mode<W: Write>(&mut self, w: &mut W, mode: EditMode) -> Result<()> {
         match mode {
             EditMode::Insert => queue!(w, SetCursorShape(CursorShape::Line))?,
             EditMode::Normal => queue!(w, SetCursorShape(CursorShape::Block))?,
-            EditMode::Command => (),
+            EditMode::Command => self.status = String::from(":"),
         }
         self.mode = mode;
         Ok(())
@@ -109,47 +141,19 @@ impl Buffer {
         key_event: KeyEvent,
     ) -> Result<()> {
         match key_event.code {
-            KeyCode::Char('i') => self.set_mode(w, EditMode::Insert)?,
-            KeyCode::Char('I') => {
-                self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(Movement::FirstChar);
-            }
-            KeyCode::Char('a') => {
-                self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(Movement::Right(1));
-            }
-            KeyCode::Char('A') => {
-                self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(Movement::End);
-            }
-            KeyCode::Char('x') => self.delete(0),
-            KeyCode::Char('o') => {
-                self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(Movement::End);
-                self.new_line();
-                self.move_cursor(Movement::Down(1));
-                self.move_cursor(Movement::Home);
-            }
-            KeyCode::Char('O') => {
-                self.set_mode(w, EditMode::Insert)?;
-                self.move_cursor(Movement::Home);
-                self.new_line();
-            }
-            KeyCode::Esc => self.status.clear(),
-            KeyCode::Char(':') => {
-                self.set_mode(w, EditMode::Command)?;
-                self.status = String::from(":");
-            }
-            KeyCode::Char(c) => self.status.push(c),
-            KeyCode::Up => self.status.push('k'),
-            KeyCode::Down => self.status.push('j'),
-            KeyCode::Left => self.status.push('h'),
-            KeyCode::Right => self.status.push('l'),
-            KeyCode::Home => self.status.push('0'),
-            KeyCode::End => self.status.push('$'),
-            KeyCode::Delete => self.status.push('x'),
+            KeyCode::Esc => self.command.clear(),
+            KeyCode::Char(c) => self.command.push(c),
+            KeyCode::Up => self.command.push('k'),
+            KeyCode::Down => self.command.push('j'),
+            KeyCode::Left => self.command.push('h'),
+            KeyCode::Right => self.command.push('l'),
+            KeyCode::Home => self.command.push('0'),
+            KeyCode::End => self.command.push('$'),
+            KeyCode::Delete => self.command.push('x'),
             _ => (),
         }
+        self.status = self.command.clone();
+        self.try_execute_normal_mode_command(w)?;
         Ok(())
     }
 
@@ -168,8 +172,8 @@ impl Buffer {
             KeyCode::PageUp => self.move_cursor(Movement::Up(self.height / 2)),
             KeyCode::PageDown => self.move_cursor(Movement::Down(self.height / 2)),
             KeyCode::Char(c) => self.insert(c),
-            KeyCode::Backspace => self.delete(-1),
-            KeyCode::Delete => self.delete(0),
+            KeyCode::Backspace => self.delete(self.bounds(Selection::UpTo(Movement::Left(1))).unwrap()),
+            KeyCode::Delete => self.delete(self.bounds(Selection::UpTo(Movement::Right(1))).unwrap()),
             KeyCode::Tab => self.insert_tab(),
             KeyCode::Enter => {
                 self.new_line();
@@ -184,56 +188,133 @@ impl Buffer {
     fn handle_keyevent_command<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
         match key_event.code {
             KeyCode::Char(c) => self.status.push(c),
-            KeyCode::Backspace => { self.status.pop(); }
-            KeyCode::Esc => {
-                self.set_mode(w, EditMode::Normal)?;
-                queue!(w, RestorePosition)?;
+            KeyCode::Backspace => {
+                self.status.pop();
+                if self.status.is_empty() {
+                    self.set_mode(w, EditMode::Normal)?;
+                }
             }
+            KeyCode::Esc => self.set_mode(w, EditMode::Normal)?,
             KeyCode::Enter => {
                 self.set_mode(w, EditMode::Normal)?;
-                queue!(w, RestorePosition)?;
                 self.execute_command(w)?;
             }
             _ => (),
         }
+
         Ok(())
     }
 
     fn execute_command<W: Write>(&mut self, w: &mut W) -> Result<()> {
         let (command, argument) = self.status.as_str().split_at(1);
-        match command {
-            ":" => match argument {
+        if let ":" = command {
+            match argument {
                 "w" => self.save()?,
-                "q" => if !self.edited {
+                "q" => {
+                    if !self.edited {
                         self.quit(w)?
                     } else {
-                        self.status = String::from("Error: No write since last change. To quit without saving, use ':q!'")
+                        self.status = String::from(
+                            "Error: No write since last change. To quit without saving, use ':q!'",
+                        )
                     }
+                }
                 "q!" => self.quit(w)?,
                 "wq" | "x" => {
                     self.save()?;
                     self.quit(w)?;
                 }
-                _ => self.status = format!("Error: invalid argument ({}) for command ({})", argument, command),
-            }
-            _ => {
-                for com in Command::parse(&self.status) {
-                    match com {
-                        
-                    }
+                _ => {
+                    self.status = format!(
+                        "Error: invalid argument ({}) for command ({})",
+                        argument, command
+                    )
                 }
             }
         }
         Ok(())
     }
 
+    fn try_execute_normal_mode_command<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        if let Some(commands) = Command::parse(&self.status) {
+            self.command.clear();
+            for com in commands {
+                match com {
+                    Command::Undo => (), //self.undo(),
+                    Command::Redo => (), //self.redo(),
+                    Command::Move(dir) => self.move_cursor(dir),
+                    Command::Delete(sel) => if let Some(bounds) = self.bounds(sel) { self.delete(bounds) }
+                    Command::Yank(_sel) => (), //self.yank(sel),
+                    Command::Paste => (),     //self.paste(plc),
+                    Command::CreateNewLine => self.new_line(),
+                    Command::SetMode(mode) => self.set_mode(w, mode)?,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn bounds(&self, sel: Selection) -> Option<Bounds> {
+        Some(match sel {
+            Selection::Lines(amount) => Bounds::new(
+                Pos::new(0, self.pos.y),
+                Pos::new(0, self.pos.y + amount)
+            ),
+            Selection::UpTo(mov) => Bounds::new(self.pos, self.get_destination(mov)),
+            Selection::Between {
+                first,
+                last,
+                inclusive: _,
+            } => match (self.rfind(first), self.find(last)) {
+                (Some(pos1), Some(pos2)) => Bounds::new(pos1, pos2),
+                _ => return None,
+            },
+            Selection::Word { inclusive: _ } => return None,
+            Selection::Paragraph { inclusive: _ } => return None,
+        })
+    }
+
+    /// Finds position of rightmost character that matches `c` on the left side of the cursor
+    fn rfind(&self, c: char) -> Option<Pos> {
+        let (left, _) = self.content[self.pos.y].split_at(self.pos.x);
+        if let Some(x) = left.rfind(c) {
+            return Some(Pos::new(x, self.pos.y));
+        }
+        for y in (0..self.pos.y).rev() {
+            if let Some(x) = self.content[y].rfind(c) {
+                return Some(Pos::new(x, y));
+            }
+        }
+        None
+    }
+
+    /// Finds position of leftmost character that matches `c` on the right side of the cursor
+    fn find(&self, c: char) -> Option<Pos> {
+        let (left, right) = self.content[self.pos.y].split_at(self.pos.x);
+        if let Some(x) = right.find(c) {
+            return Some(Pos::new(left.len() + x, self.pos.y));
+        }
+        for y in self.pos.y..self.content.len() {
+            if let Some(x) = self.content[y].find(c) {
+                return Some(Pos::new(x, y));
+            }
+        }
+        None
+    }
+
+    /// Saves the current state of the buffer to the file
     fn save(&mut self) -> Result<()> {
         fs::write(&self.path, self.content.join("\n").as_bytes())?;
-        self.status = format!("\"{}\" {}L written", self.path.to_str().unwrap(), self.content.len());
+        self.status = format!(
+            "\"{}\" {}L written",
+            self.path.to_str().unwrap(),
+            self.content.len()
+        );
         self.edited = false;
         Ok(())
     }
 
+    /// Cleans up and quits the application
     fn quit<W: Write>(&mut self, w: &mut W) -> Result<()> {
         execute!(
             w,
@@ -252,25 +333,25 @@ impl Buffer {
             .content
             .iter()
             .enumerate()
-            .skip(self.row_offset)
+            .skip(self.offset.y)
             .take(self.height.saturating_sub(2))
         {
             queue!(
                 w,
                 Print(format!(
                     "{: >width$} ",
-                    (i as i64 - self.row as i64).abs(),
+                    (i as i64 - self.pos.y as i64).abs(),
                     width = self.line_nr_cols - 1
                 ))
             )?;
-            if line.len() > self.col_offset {
+            if line.len() > self.offset.x {
                 queue!(
                     w,
                     Print(
-                        &line[self.col_offset
+                        &line[self.offset.x
                             ..usize::min(
                                 line.len(),
-                                self.col_offset + self.width - self.line_nr_cols
+                                self.offset.x + self.width - self.line_nr_cols
                             )]
                     )
                 )?;
@@ -282,7 +363,13 @@ impl Buffer {
         queue!(
             w,
             MoveTo(0, self.height as u16 - 2),
-            Print(format!("{: <width$} {: >3}:{: <3}", self.path.to_str().unwrap(), self.row, self.col, width=self.width - 9)),
+            Print(format!(
+                "{: <width$} {: >3}:{: <3}",
+                self.path.to_str().unwrap(),
+                self.pos.y,
+                self.pos.x,
+                width = self.width - 9
+            )),
             MoveTo(0, self.height as u16 - 1),
             Print(&self.status)
         )?;
@@ -291,161 +378,138 @@ impl Buffer {
         Ok(())
     }
 
+    /// Recalculate the necessary number of columns needed to display line numbers for the buffer
     fn update_line_nr_cols(&mut self) {
         self.line_nr_cols = self.content.len().to_string().len() + 1;
     }
 
     fn new_line(&mut self) {
         self.edited = true;
-        let new_line = self.content[self.row].split_off(self.col);
-        self.content.insert(self.row + 1, new_line);
+        let new_line = self.content[self.pos.y].split_off(self.pos.x);
+        self.content.insert(self.pos.y + 1, new_line);
         self.update_line_nr_cols();
     }
 
     fn insert(&mut self, c: char) {
         self.edited = true;
         self.content
-            .get_mut(self.row)
-            .expect("self.row out of range for buffer")
-            .insert(self.col, c);
-        self.col += 1;
+            .get_mut(self.pos.y)
+            .expect("self.pos.y out of range for buffer")
+            .insert(self.pos.x, c);
+        self.pos.x += 1;
     }
 
     fn insert_tab(&mut self) {
         self.edited = true;
-        let spaces = 4 - self.col % self.tab_size;
+        let spaces = 4 - self.pos.x % self.tab_size;
         self.content
-            .get_mut(self.row)
-            .expect("self.row out of range for buffer")
-            .insert_str(self.col, &" ".repeat(spaces));
-        self.col += spaces;
+            .get_mut(self.pos.y)
+            .expect("self.pos.y out of range for buffer")
+            .insert_str(self.pos.x, &" ".repeat(spaces));
+        self.pos.x += spaces;
     }
 
-    fn delete(&mut self, offset: isize) {
+    fn delete(&mut self, b: Bounds) {
         self.edited = true;
-        if self.col == 0 && offset == -1 {
-            if self.row == 0 {
-                return;
-            }
-            self.row -= 1;
-            self.move_cursor(Movement::End);
-            let row = self.content[self.row + 1].clone();
-            self.content[self.row].push_str(row.as_str());
-            self.content.remove(self.row + 1);
-            self.update_line_nr_cols();
-        } else {
-            let removed = (self.col as isize + offset) as usize;
-            self.content
-                .get_mut(self.row)
-                .expect("self.row out of range for buffer")
-                .remove(removed);
-            self.col = removed;
-        }
-        self.col = usize::min(self.max_col(), self.col);
+        let left = String::from(self.content[b.left.y].split_at(b.left.x).0);
+        let right = String::from(self.content[b.right.y].split_at(b.right.x).1);
+        self.content[b.right.y] = left.to_string() + &right;
+        self.content.drain(b.left.y..b.right.y);
+        self.pos = b.left;
     }
 
     // Scroll left if cursor is on left side of bounds
     fn clamp_cursor_left(&mut self, pad: usize) {
-        if self.col.saturating_sub(self.col_offset) < pad {
-            self.col_offset = self.col.saturating_sub(pad);
+        if self.pos.x.saturating_sub(self.offset.x) < pad {
+            self.offset.x = self.pos.x.saturating_sub(pad);
         }
     }
 
     // Scroll right if cursor is on right side of bounds
     fn clamp_cursor_right(&mut self, pad: usize) {
-        if self.col.saturating_sub(self.col_offset) + self.line_nr_cols + pad + 1 > self.width {
-            self.col_offset = (self.col + self.line_nr_cols + pad + 1).saturating_sub(self.width);
+        if self.pos.x.saturating_sub(self.offset.x) + self.line_nr_cols + pad + 1 > self.width {
+            self.offset.x = (self.pos.x + self.line_nr_cols + pad + 1).saturating_sub(self.width);
         }
     }
 
     // Scroll up if cursor is above bounds
     fn clamp_cursor_top(&mut self, pad: usize) {
-        if self.row.saturating_sub(self.row_offset) < pad {
-            self.row_offset = self.row.saturating_sub(pad);
+        if self.pos.y.saturating_sub(self.offset.y) < pad {
+            self.offset.y = self.pos.y.saturating_sub(pad);
         }
     }
 
     // Scroll down if cursor is below bounds
     fn clamp_cursor_bottom(&mut self, pad: usize) {
-        if self.row.saturating_sub(self.row_offset) + pad + 2 > self.height {
-            self.row_offset = (self.row + pad + 2).saturating_sub(self.height);
+        if self.pos.y.saturating_sub(self.offset.y) + pad + 2 > self.height {
+            self.offset.y = (self.pos.y + pad + 2).saturating_sub(self.height);
         }
     }
 
-    fn restore_saved_col(&mut self) {
-        self.col = usize::min(
-            self.saved_col,
-            self.content[self.row].len().saturating_sub(1),
-        );
-    }
-
-    fn max_col(&self) -> usize {
+    fn _max_col(&self, y: usize) -> usize {
         match self.mode {
-            EditMode::Normal => self.content[self.row].len().saturating_sub(1),
-            EditMode::Insert => self.content[self.row].len(),
+            EditMode::Normal => self.content[y].len().saturating_sub(1),
+            EditMode::Insert => self.content[y].len(),
             EditMode::Command => self.status.len(),
         }
     }
 
-    fn move_cursor(&mut self, movement_type: Movement) {
+    fn max_col(&self, y: usize) -> usize {
+        self.content[y].len()
+    }
+
+    fn get_destination(&self, movement_type: Movement) -> Pos {
         match movement_type {
             Movement::Up(amount) => {
-                self.row = self.row.saturating_sub(amount);
-                self.restore_saved_col();
-                self.clamp_cursor_top(3);
-                self.clamp_cursor_left(5);
-                self.clamp_cursor_right(5);
+                let y = self.pos.y.saturating_sub(amount);
+                let x = usize::min(self.max_col(y), self.saved_col);
+                Pos::new(x, y)
             }
             Movement::Down(amount) => {
-                self.row = usize::min(self.row + amount, self.content.len().saturating_sub(1));
-                self.restore_saved_col();
-                self.clamp_cursor_bottom(3);
-                self.clamp_cursor_left(5);
-                self.clamp_cursor_right(5);
+                let y = usize::min(self.pos.y + amount, self.content.len().saturating_sub(1));
+                let x = usize::min(self.max_col(y), self.saved_col);
+                Pos::new(x, y)
             }
             Movement::Left(amount) => {
-                self.col = self.col.saturating_sub(amount);
-                self.saved_col = self.col;
-                self.clamp_cursor_left(5);
+                let x = self.pos.x.saturating_sub(amount);
+                Pos::new(x, self.pos.y)
             }
             Movement::Right(amount) => {
-                self.col = usize::min(self.col + amount, self.max_col());
-                self.saved_col = self.col;
-                self.clamp_cursor_right(5);
+                let x = usize::min(self.pos.x + amount, self.max_col(self.pos.y));
+                Pos::new(x, self.pos.y)
             }
-            Movement::Home => {
-                self.col = 0;
-                self.saved_col = 0;
-                // No clamping needed, because we already know the offset will be 0.
-                self.col_offset = 0;
-            }
-            Movement::End => {
-                self.col = self.max_col();
-                self.saved_col = self.col;
-                self.clamp_cursor_right(5);
-            }
-            Movement::FirstChar => {
-                let index = self.content[self.row]
+            Movement::Home => Pos::new(0, self.pos.y),
+            Movement::End => Pos::new(self.max_col(self.pos.y), self.pos.y),
+            Movement::FirstChar => Pos::new(
+                self.content[self.pos.y]
                     .find(|c| !char::is_whitespace(c))
-                    .unwrap_or(0);
-                self.col = index;
-                self.clamp_cursor_left(5);
-            }
+                    .unwrap_or(0),
+                self.pos.y,
+            ),
             Movement::Top => {
-                self.row = self.col_offset + 3;
-                self.restore_saved_col();
+                let y = self.offset.x + 3;
+                let x = usize::min(self.max_col(y), self.saved_col);
+                Pos::new(x, y)
             }
             Movement::Bottom => {
-                self.row = self.col_offset + self.height - 3;
-                self.restore_saved_col();
+                let y = self.offset.x + self.height - 3;
+                let x = usize::min(self.max_col(y), self.saved_col);
+                Pos::new(x, y)
             }
             Movement::NextWord(_amount) => {
-                unimplemented!();
+                unimplemented!()
             }
             Movement::PrevWord(_amount) => {
-                unimplemented!();
+                unimplemented!()
             }
+        }
+    }
 
+    fn move_cursor(&mut self, movement_type: Movement) {
+        self.pos = self.get_destination(movement_type);
+        match movement_type {
+            Movement::Left(_) | Movement::Right(_) | Movement::Home | Movement::End => self.saved_col = self.pos.x,
+            _ => (),
         }
     }
 
@@ -454,14 +518,74 @@ impl Buffer {
             EditMode::Command => {
                 queue!(w, MoveTo(self.status.len() as u16, self.height as u16 - 1))?
             }
-            _ => queue!(
-                w,
-                MoveTo(
-                    (self.col - self.col_offset + self.line_nr_cols) as u16,
-                    (self.row - self.row_offset) as u16
-                )
-            )?,
+            _ => {
+                queue!(
+                    w,
+                    MoveTo(
+                        (self.pos.x - self.offset.x + self.line_nr_cols) as u16,
+                        (self.pos.y - self.offset.y) as u16
+                    )
+                )?;
+                self.clamp_cursor_top(3);
+                self.clamp_cursor_bottom(3);
+                self.clamp_cursor_left(5);
+                self.clamp_cursor_right(5);
+            }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{Buffer, Pos};
+
+    fn get_buffer() -> Buffer {
+        let content: Vec<String> = 
+"fn test(x: usize) -> Pos {
+    let y = usize::min(x, 3);
+    Pos { x, y }
+}
+".lines().map(String::from).collect();
+        Buffer {
+            content,
+            width: 100,
+            height: 50,
+            ..Buffer::default()
+        }
+    }
+
+    #[test]
+    fn find_left_bracket() {
+        let mut buffer = get_buffer();
+        buffer.pos = Pos::new(10, 0);
+        assert_eq!(Some(Pos::new(7, 0)), buffer.rfind('('));
+        buffer.pos = Pos::new(11, 0);
+        assert_eq!(Some(Pos::new(7, 0)), buffer.rfind('('));
+        buffer.pos = Pos::new(12, 0);
+        assert_eq!(Some(Pos::new(7, 0)), buffer.rfind('('));
+        buffer.pos = Pos::new(13, 0);
+        assert_eq!(Some(Pos::new(7, 0)), buffer.rfind('('));
+    }
+
+    #[test]
+    fn find_right_bracket() {
+        let mut buffer = get_buffer();
+        buffer.pos = Pos::new(10, 0);
+        assert_eq!(Some(Pos::new(16, 0)), buffer.find(')'));
+        buffer.pos = Pos::new(11, 0);
+        assert_eq!(Some(Pos::new(16, 0)), buffer.find(')'));
+        buffer.pos = Pos::new(12, 0);
+        assert_eq!(Some(Pos::new(16, 0)), buffer.find(')'));
+        buffer.pos = Pos::new(13, 0);
+        assert_eq!(Some(Pos::new(16, 0)), buffer.find(')'));
+    }
+
+    #[test]
+    fn skip_other_bracket_pairs() {
+        let mut buffer = get_buffer();
+        buffer.pos = Pos::new(0, 1);
+        assert_eq!(Some(Pos::new(36, 0)), buffer.rfind('{'));
+        assert_eq!(Some(Pos::new(0, 3)), buffer.find('}'));
     }
 }
