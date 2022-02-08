@@ -114,11 +114,13 @@ impl Command {
                 Self::Move(Movement::Up(1)),
                 Self::Move(Movement::End),
                 Self::CreateNewLine,
+                Self::Move(Movement::Down(1)),
             ],
             "o" => vec![
                 Self::SetMode(EditMode::Insert),
                 Self::Move(Movement::End),
                 Self::CreateNewLine,
+                Self::Move(Movement::Down(1)),
             ],
             "w" => vec![Self::Move(Movement::NextWord(1))],
             "U" => vec![Self::Redo],

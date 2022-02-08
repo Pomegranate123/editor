@@ -61,12 +61,21 @@ impl Bounds {
             }
         }
     }
+
+    pub fn from_delimiters(pos1: Pos, pos2: Pos, inclusive: bool) -> Self {
+        let mut bounds = Self::new(pos1, pos2);
+        match inclusive {
+            true => bounds.right.x += 1,
+            false => bounds.left.x += 1,
+        }
+        bounds
+    }
 }
 
 #[derive(Default)]
 pub struct Buffer {
     /// The text contained by the buffer
-    pub content: Vec<String>,
+    content: Vec<String>,
     /// The path of the file being edited
     path: PathBuf,
     /// The mode the buffer is currently being edited in
@@ -76,17 +85,17 @@ pub struct Buffer {
     /// The contents of the bottom statusline
     status: String,
     /// Whether the buffer has been edited since saving
-    pub edited: bool,
+    edited: bool,
     /// Saved column index for easier traversal
     saved_col: usize,
-    ///
+    /// Position the buffer is scrolled to
     offset: Pos,
     /// Position of cursor in buffer
     pos: Pos,
     /// The width the buffer gets to render
-    pub width: usize,
+    width: usize,
     /// The height the buffer gets to render
-    pub height: usize,
+    height: usize,
     /// The amount of columns reserved for line numbers
     pub line_nr_cols: usize,
     /// The size of tab characters
@@ -114,6 +123,10 @@ impl Buffer {
         }
     }
 
+    pub fn update_size(&mut self, width: usize, height: usize) {
+        self.width = width;
+        self.height = height;
+    }
 
     fn set_mode<W: Write>(&mut self, w: &mut W, mode: EditMode) -> Result<()> {
         match mode {
@@ -127,111 +140,84 @@ impl Buffer {
 
     pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
         match self.mode {
-            EditMode::Normal => self.handle_keyevent_normal(w, key_event)?,
-            EditMode::Insert => self.handle_keyevent_insert(w, key_event)?,
-            EditMode::Command => self.handle_keyevent_command(w, key_event)?,
-        }
-        self.update_cursor(w)?;
-        Ok(())
-    }
-
-    pub fn handle_keyevent_normal<W: Write>(
-        &mut self,
-        w: &mut W,
-        key_event: KeyEvent,
-    ) -> Result<()> {
-        match key_event.code {
-            KeyCode::Esc => self.command.clear(),
-            KeyCode::Char(c) => self.command.push(c),
-            KeyCode::Up => self.command.push('k'),
-            KeyCode::Down => self.command.push('j'),
-            KeyCode::Left => self.command.push('h'),
-            KeyCode::Right => self.command.push('l'),
-            KeyCode::Home => self.command.push('0'),
-            KeyCode::End => self.command.push('$'),
-            KeyCode::Delete => self.command.push('x'),
-            _ => (),
-        }
-        self.status = self.command.clone();
-        self.try_execute_normal_mode_command(w)?;
-        Ok(())
-    }
-
-    fn handle_keyevent_insert<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
-        match key_event.code {
-            KeyCode::Esc => {
-                self.set_mode(w, EditMode::Normal)?;
-                self.move_cursor(Movement::Left(1));
-            }
-            KeyCode::Up => self.move_cursor(Movement::Up(1)),
-            KeyCode::Down => self.move_cursor(Movement::Down(1)),
-            KeyCode::Left => self.move_cursor(Movement::Left(1)),
-            KeyCode::Right => self.move_cursor(Movement::Right(1)),
-            KeyCode::Home => self.move_cursor(Movement::Home),
-            KeyCode::End => self.move_cursor(Movement::End),
-            KeyCode::PageUp => self.move_cursor(Movement::Up(self.height / 2)),
-            KeyCode::PageDown => self.move_cursor(Movement::Down(self.height / 2)),
-            KeyCode::Char(c) => self.insert(c),
-            KeyCode::Backspace => self.delete(self.bounds(Selection::UpTo(Movement::Left(1))).unwrap()),
-            KeyCode::Delete => self.delete(self.bounds(Selection::UpTo(Movement::Right(1))).unwrap()),
-            KeyCode::Tab => self.insert_tab(),
-            KeyCode::Enter => {
-                self.new_line();
-                self.move_cursor(Movement::Down(1));
-                self.move_cursor(Movement::Home);
-            }
-            _ => (),
-        }
-        Ok(())
-    }
-
-    fn handle_keyevent_command<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
-        match key_event.code {
-            KeyCode::Char(c) => self.status.push(c),
-            KeyCode::Backspace => {
-                self.status.pop();
-                if self.status.is_empty() {
-                    self.set_mode(w, EditMode::Normal)?;
+            EditMode::Normal => {
+                match key_event.code {
+                    KeyCode::Esc => self.command.clear(),
+                    KeyCode::Char(c) => self.command.push(c),
+                    KeyCode::Up => self.command.push('k'),
+                    KeyCode::Down => self.command.push('j'),
+                    KeyCode::Left => self.command.push('h'),
+                    KeyCode::Right => self.command.push('l'),
+                    KeyCode::Home => self.command.push('0'),
+                    KeyCode::End => self.command.push('$'),
+                    KeyCode::Delete => self.command.push('x'),
+                    _ => (),
                 }
+                self.status = self.command.clone();
+                self.try_execute_normal_mode_command(w)?;
             }
-            KeyCode::Esc => self.set_mode(w, EditMode::Normal)?,
-            KeyCode::Enter => {
-                self.set_mode(w, EditMode::Normal)?;
-                self.execute_command(w)?;
-            }
-            _ => (),
-        }
-
-        Ok(())
-    }
-
-    fn execute_command<W: Write>(&mut self, w: &mut W) -> Result<()> {
-        let (command, argument) = self.status.as_str().split_at(1);
-        if let ":" = command {
-            match argument {
-                "w" => self.save()?,
-                "q" => {
-                    if !self.edited {
-                        self.quit(w)?
-                    } else {
-                        self.status = String::from(
-                            "Error: No write since last change. To quit without saving, use ':q!'",
-                        )
+            EditMode::Insert => match key_event.code {
+                KeyCode::Char(c) => self.insert(c),
+                KeyCode::Esc => {
+                    self.set_mode(w, EditMode::Normal)?;
+                    self.move_cursor(Movement::Left(1));
+                }
+                KeyCode::Up => self.move_cursor(Movement::Up(1)),
+                KeyCode::Down => self.move_cursor(Movement::Down(1)),
+                KeyCode::Left => self.move_cursor(Movement::Left(1)),
+                KeyCode::Right => self.move_cursor(Movement::Right(1)),
+                KeyCode::Home => self.move_cursor(Movement::Home),
+                KeyCode::End => self.move_cursor(Movement::End),
+                KeyCode::PageUp => self.move_cursor(Movement::Up(self.height / 2)),
+                KeyCode::PageDown => self.move_cursor(Movement::Down(self.height / 2)),
+                KeyCode::Backspace => {
+                    self.delete(self.bounds(Selection::UpTo(Movement::Left(1))).unwrap())
+                }
+                KeyCode::Delete => {
+                    self.delete(self.bounds(Selection::UpTo(Movement::Right(1))).unwrap())
+                }
+                KeyCode::Tab => self.insert_tab(),
+                KeyCode::Enter => {
+                    self.new_line();
+                    self.move_cursor(Movement::Down(1));
+                    self.move_cursor(Movement::Home);
+                }
+                _ => (),
+            },
+            EditMode::Command => match key_event.code {
+                KeyCode::Char(c) => self.status.push(c),
+                KeyCode::Backspace => {
+                    self.status.pop();
+                    if self.status.is_empty() {
+                        self.set_mode(w, EditMode::Normal)?;
                     }
                 }
-                "q!" => self.quit(w)?,
-                "wq" | "x" => {
-                    self.save()?;
-                    self.quit(w)?;
+                KeyCode::Esc => self.set_mode(w, EditMode::Normal)?,
+                KeyCode::Enter => {
+                    self.set_mode(w, EditMode::Normal)?;
+                    match self.status.as_str() {
+                        ":w" => self.save()?,
+                        ":q" => {
+                            if !self.edited {
+                                self.quit(w)?
+                            } else {
+                                self.status = String::from(
+                                        "Error: No write since last change. To quit without saving, use ':q!'",
+                                    )
+                            }
+                        }
+                        ":q!" => self.quit(w)?,
+                        ":wq" | ":x" => {
+                            self.save()?;
+                            self.quit(w)?;
+                        }
+                        _ => self.status = format!("Error: invalid command ({})", self.status),
+                    }
                 }
-                _ => {
-                    self.status = format!(
-                        "Error: invalid argument ({}) for command ({})",
-                        argument, command
-                    )
-                }
-            }
+                _ => (),
+            },
         }
+        self.update_cursor(w)?;
         Ok(())
     }
 
@@ -243,9 +229,13 @@ impl Buffer {
                     Command::Undo => (), //self.undo(),
                     Command::Redo => (), //self.redo(),
                     Command::Move(dir) => self.move_cursor(dir),
-                    Command::Delete(sel) => if let Some(bounds) = self.bounds(sel) { self.delete(bounds) }
+                    Command::Delete(sel) => {
+                        if let Some(bounds) = self.bounds(sel) {
+                            self.delete(bounds)
+                        }
+                    }
                     Command::Yank(_sel) => (), //self.yank(sel),
-                    Command::Paste => (),     //self.paste(plc),
+                    Command::Paste => (),      //self.paste(plc),
                     Command::CreateNewLine => self.new_line(),
                     Command::SetMode(mode) => self.set_mode(w, mode)?,
                 }
@@ -256,17 +246,16 @@ impl Buffer {
 
     fn bounds(&self, sel: Selection) -> Option<Bounds> {
         Some(match sel {
-            Selection::Lines(amount) => Bounds::new(
-                Pos::new(0, self.pos.y),
-                Pos::new(0, self.pos.y + amount)
-            ),
+            Selection::Lines(amount) => {
+                Bounds::new(Pos::new(0, self.pos.y), Pos::new(0, self.pos.y + amount))
+            }
             Selection::UpTo(mov) => Bounds::new(self.pos, self.get_destination(mov)),
             Selection::Between {
                 first,
                 last,
-                inclusive: _,
+                inclusive,
             } => match (self.rfind(first), self.find(last)) {
-                (Some(pos1), Some(pos2)) => Bounds::new(pos1, pos2),
+                (Some(pos1), Some(pos2)) => Bounds::from_delimiters(pos1, pos2, inclusive),
                 _ => return None,
             },
             Selection::Word { inclusive: _ } => return None,
@@ -418,42 +407,6 @@ impl Buffer {
         self.pos = b.left;
     }
 
-    // Scroll left if cursor is on left side of bounds
-    fn clamp_cursor_left(&mut self, pad: usize) {
-        if self.pos.x.saturating_sub(self.offset.x) < pad {
-            self.offset.x = self.pos.x.saturating_sub(pad);
-        }
-    }
-
-    // Scroll right if cursor is on right side of bounds
-    fn clamp_cursor_right(&mut self, pad: usize) {
-        if self.pos.x.saturating_sub(self.offset.x) + self.line_nr_cols + pad + 1 > self.width {
-            self.offset.x = (self.pos.x + self.line_nr_cols + pad + 1).saturating_sub(self.width);
-        }
-    }
-
-    // Scroll up if cursor is above bounds
-    fn clamp_cursor_top(&mut self, pad: usize) {
-        if self.pos.y.saturating_sub(self.offset.y) < pad {
-            self.offset.y = self.pos.y.saturating_sub(pad);
-        }
-    }
-
-    // Scroll down if cursor is below bounds
-    fn clamp_cursor_bottom(&mut self, pad: usize) {
-        if self.pos.y.saturating_sub(self.offset.y) + pad + 2 > self.height {
-            self.offset.y = (self.pos.y + pad + 2).saturating_sub(self.height);
-        }
-    }
-
-    fn _max_col(&self, y: usize) -> usize {
-        match self.mode {
-            EditMode::Normal => self.content[y].len().saturating_sub(1),
-            EditMode::Insert => self.content[y].len(),
-            EditMode::Command => self.status.len(),
-        }
-    }
-
     fn max_col(&self, y: usize) -> usize {
         self.content[y].len()
     }
@@ -508,7 +461,9 @@ impl Buffer {
     fn move_cursor(&mut self, movement_type: Movement) {
         self.pos = self.get_destination(movement_type);
         match movement_type {
-            Movement::Left(_) | Movement::Right(_) | Movement::Home | Movement::End => self.saved_col = self.pos.x,
+            Movement::Left(_) | Movement::Right(_) | Movement::Home | Movement::End => {
+                self.saved_col = self.pos.x
+            }
             _ => (),
         }
     }
@@ -519,6 +474,22 @@ impl Buffer {
                 queue!(w, MoveTo(self.status.len() as u16, self.height as u16 - 1))?
             }
             _ => {
+                // Scroll left if cursor is on left side of bounds
+                if self.pos.x.saturating_sub(self.offset.x) < 5 {
+                    self.offset.x = self.pos.x.saturating_sub(5);
+                }
+                // Scroll right if cursor is on right side of bounds
+                if self.pos.x.saturating_sub(self.offset.x) + self.line_nr_cols + 5 + 1 > self.width {
+                    self.offset.x = (self.pos.x + self.line_nr_cols + 5 + 1).saturating_sub(self.width);
+                }
+                // Scroll up if cursor is above bounds
+                if self.pos.y.saturating_sub(self.offset.y) < 3 {
+                    self.offset.y = self.pos.y.saturating_sub(3);
+                }
+                // Scroll down if cursor is below bounds
+                if self.pos.y.saturating_sub(self.offset.y) + 3 + 2 > self.height {
+                    self.offset.y = (self.pos.y + 3 + 2).saturating_sub(self.height);
+                }
                 queue!(
                     w,
                     MoveTo(
@@ -526,10 +497,6 @@ impl Buffer {
                         (self.pos.y - self.offset.y) as u16
                     )
                 )?;
-                self.clamp_cursor_top(3);
-                self.clamp_cursor_bottom(3);
-                self.clamp_cursor_left(5);
-                self.clamp_cursor_right(5);
             }
         }
         Ok(())
@@ -541,12 +508,14 @@ mod test {
     use super::{Buffer, Pos};
 
     fn get_buffer() -> Buffer {
-        let content: Vec<String> = 
-"fn test(x: usize) -> Pos {
+        let content: Vec<String> = "fn test(x: usize) -> Pos {
     let y = usize::min(x, 3);
     Pos { x, y }
 }
-".lines().map(String::from).collect();
+"
+        .lines()
+        .map(String::from)
+        .collect();
         Buffer {
             content,
             width: 100,

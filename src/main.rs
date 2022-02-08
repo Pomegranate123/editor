@@ -75,9 +75,7 @@ impl Editor {
     }
 
     pub fn update_size(&mut self, width: usize, height: usize) {
-        let buffer = self.buffer_mut();
-        buffer.width = width;
-        buffer.height = height;
+        self.buffer_mut().update_size(width, height);
         self.width = width;
         self.height = height;
     }
