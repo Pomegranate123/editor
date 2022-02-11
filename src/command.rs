@@ -1,6 +1,8 @@
-use crate::buffer::EditMode;
+use crate::buffer::{Buffer, EditMode};
 use lazy_static::lazy_static;
 use regex::Regex;
+use std::io::Write;
+use crossterm::Result;
 
 #[derive(Clone, Copy)]
 pub enum Movement {
@@ -17,6 +19,7 @@ pub enum Movement {
     PrevWord(usize),
 }
 
+#[derive(Clone, Copy)]
 pub enum Selection {
     Lines(usize),
     UpTo(Movement),
@@ -77,6 +80,27 @@ impl Command {
                 })
             }),
         }
+    }
+
+    pub fn execute<W: Write>(&self, w: &mut W, buffer: &mut Buffer) -> Result<()> {
+        match self {
+            Command::Undo => (), //buffer.undo(),
+            Command::Redo => (), //buffer.redo(),
+            Command::Move(dir) => buffer.move_cursor(*dir),
+            Command::Delete(sel) => {
+                if let Some(bounds) = buffer.bounds(*sel) {
+                    buffer.content.delete(bounds)
+                }
+            }
+            Command::Yank(_sel) => (), //buffer.copy(sel),
+            Command::Paste => (),      //buffer.paste(plc),
+            Command::CreateNewLine => {
+                buffer.content.insert(buffer.pos, "\n");
+                buffer.update_line_nr_cols();
+            },
+            Command::SetMode(mode) => buffer.set_mode(w, *mode)?,
+        }
+        Ok(())
     }
 
     fn parse_simple(command: &str) -> Option<Vec<Self>> {

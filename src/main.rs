@@ -13,10 +13,13 @@ use std::{
     path::PathBuf,
 };
 
+mod config;
 mod buffer;
 mod command;
+mod highlight;
 
 fn main() {
+    //highlight::run();
     run(&mut io::stdout()).unwrap();
 }
 
