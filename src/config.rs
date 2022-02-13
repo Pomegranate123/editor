@@ -6,7 +6,7 @@ struct Config {
     hl_styles: HashMap<String, Style>
 }
 
-#[derive(Serialize, Deserialize)]
+//#[derive(Serialize, Deserialize)]
 struct Style {
     fg: Option<Color>,
     bg: Option<Color>,

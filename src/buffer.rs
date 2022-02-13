@@ -11,7 +11,8 @@ use crossterm::{
     Result,
 };
 use tree_sitter_highlight::{Highlighter, HighlightConfiguration, HighlightEvent};
-use std::{fs, io::Write, path::PathBuf, process};
+use ropey::Rope;
+use std::{fs::{self, File}, io::{Write, BufWriter, BufReader}, path::PathBuf, process};
 
 #[derive(Clone, Copy)]
 pub enum EditMode {
@@ -141,7 +142,7 @@ impl Default for Content {
 
 pub struct Buffer {
     /// The text contained by the buffer
-    pub content: Content,
+    pub content: Rope,
     /// The path of the file being edited
     path: PathBuf,
     /// The mode the buffer is currently being edited in
@@ -155,7 +156,7 @@ pub struct Buffer {
     /// Position the buffer is scrolled to
     offset: Pos,
     /// Position of cursor in buffer
-    pub pos: Pos,
+    idx: usize,
     /// Saved column index for easier traversal
     saved_col: usize,
     /// The width the buffer gets to render
@@ -172,8 +173,8 @@ pub struct Buffer {
 impl Buffer {
     pub fn new(path: PathBuf) -> Self {
         let (width, height) = terminal::size().unwrap();
-        let content = Content::new(fs::read_to_string(&path).unwrap_or(String::from("\n")));
-        let line_nr_cols = content.len().to_string().len() + 1;
+        let content = Rope::from_reader(BufReader::new(File::open(path).unwrap())).unwrap();
+        let line_nr_cols = content.len_lines().to_string().len() + 1;
         let hl_conf = highlight::get_hl_conf(&path);
 
         Buffer {
@@ -189,9 +190,21 @@ impl Buffer {
             edited: false,
             mode: EditMode::Normal,
             offset: Pos::new(0, 0),
-            pos: Pos::new(0, 0),
+            idx: 0,
             saved_col: 0,
         }
+    }
+
+    fn row(&self) -> usize {
+        self.content.char_to_line(self.idx)
+    }
+
+    fn col(&self) -> usize {
+        self.idx - self.content.line_to_char(self.row())
+    }
+
+    fn pos_to_index(&self, pos: Pos) -> usize {
+        self.content.line_to_char(pos.y) + pos.x
     }
 
     pub fn update_size(&mut self, width: usize, height: usize) {
@@ -209,32 +222,33 @@ impl Buffer {
         Ok(())
     }
 
-    pub fn bounds(&self, sel: Selection) -> Option<Bounds> {
-        Some(match sel {
-            Selection::Lines(amount) => {
-                Bounds::new(self.content.index_from_pos(Pos::new(0, self.pos.y)).unwrap(), self.content.index_from_pos(Pos::new(0, self.pos.y + amount)).unwrap())
-            }
-            Selection::UpTo(mov) => Bounds::new(self.content.index_from_pos(self.pos).unwrap(), self.content.index_from_pos(self.get_destination(mov)).unwrap()),
-            Selection::Between {
-                first,
-                last,
-                inclusive,
-            } => match (self.content.rfind(first), self.content.find(last)) {
-                (Some(pos1), Some(pos2)) => Bounds::from_delimiters(pos1, pos2, inclusive),
-                _ => return None,
-            },
-            Selection::Word { inclusive: _ } => return None,
-            Selection::Paragraph { inclusive: _ } => return None,
-        })
-    }
+    // pub fn bounds(&self, sel: Selection) -> Option<Bounds> {
+    //     Some(match sel {
+    //         Selection::Lines(amount) => {
+    //             Bounds::new(self.content.index_from_pos(Pos::new(0, self.pos.y)).unwrap(), self.content.index_from_pos(Pos::new(0, self.pos.y + amount)).unwrap())
+    //         }
+    //         Selection::UpTo(mov) => Bounds::new(self.content.index_from_pos(self.pos).unwrap(), self.content.index_from_pos(self.get_destination(mov)).unwrap()),
+    //         Selection::Between {
+    //             first,
+    //             last,
+    //             inclusive,
+    //         } => match (self.content.rfind(first), self.content.find(last)) {
+    //             (Some(pos1), Some(pos2)) => Bounds::from_delimiters(pos1, pos2, inclusive),
+    //             _ => return None,
+    //         },
+    //         Selection::Word { inclusive: _ } => return None,
+    //         Selection::Paragraph { inclusive: _ } => return None,
+    //     })
+    // }
 
     /// Saves the current state of the buffer to the file
     fn save(&mut self) -> Result<()> {
-        fs::write(&self.path, self.content.raw.as_bytes())?;
+        self.content.write_to(BufWriter::new(File::create(self.path)?));
         self.status = format!(
-            "\"{}\" {}L written",
+            "\"{}\" {}L, {}C written",
             self.path.to_str().unwrap(),
-            self.content.len()
+            self.content.len_lines(),
+            self.content.len_chars(),
         );
         self.edited = false;
         Ok(())
@@ -254,6 +268,26 @@ impl Buffer {
     }
 
     pub fn draw<W: Write>(&self, w: &mut W) -> Result<()> {
+        let highlight_names = &[
+            "attribute",
+            "constant",
+            "function.builtin",
+            "function",
+            "keyword",
+            "operator",
+            "property",
+            "punctuation",
+            "punctuation.bracket",
+            "punctuation.delimiter",
+            "string",
+            "string.special",
+            "tag",
+            "type",
+            "type.builtin",
+            "variable",
+            "variable.builtin",
+            "variable.parameter",
+        ];
 
         let mut hl = Highlighter::new();
         queue!(w, SavePosition, Hide, MoveTo(0, 0), Clear(ClearType::All))?;
@@ -264,69 +298,42 @@ impl Buffer {
             width = self.line_nr_cols - 1
         )))?;
         let mut line_nr = 1;
-        let mut chars = self.content.raw.chars();
-
-        match &self.hl_conf {
-            None => {
-                for c in chars {
-                    match c {
-                        '\t' => queue!(w, Print("   "))?,
-                        '\n' => {
-                            queue!(w, MoveToNextLine(1),
-                                Print(format!(
-                                    "{: >width$} ",
-                                    (line_nr as i64 - self.pos.y as i64).abs(),
-                                    width = self.line_nr_cols - 1
-                                ))
-                            )?;
-                            line_nr += 1;
-                        }
-                        _ => queue!(w, Print(c))?,
-                    }
-                }
-            }
-            Some(hl_conf) => {
-                let highlights = hl.highlight(
-                    hl_conf,
-                    self.content.raw.as_bytes(),
-                    None,
-                    |_| None
-                ).unwrap();
-
-                for event in highlights {
-                    match event.unwrap() {
-                        HighlightEvent::Source {start, end} => {
-                            for _ in start..end {
-                                match chars.next().unwrap() {
-                                    '\t' => queue!(w, Print("   "))?,
-                                    '\n' => {
-                                        queue!(w, MoveToNextLine(1),
-                                            Print(format!(
-                                                "{: >width$} ",
-                                                (line_nr as i64 - self.pos.y as i64).abs(),
-                                                width = self.line_nr_cols - 1
-                                            ))
-                                        )?;
-                                        line_nr += 1;
-                                    }
-                                    c => queue!(w, Print(c))?,
-                                }
+        let bytes = self.content.bytes().collect::<Vec<u8>>();
+        for event in hl.highlight(
+            &self.hl_conf.unwrap(),
+            &bytes,
+            None,
+            |_| None).unwrap() {
+            match event.unwrap() {
+                HighlightEvent::Source {start, end} => {
+                    let text = self.content.slice(self.content.byte_to_char(start)..self.content.byte_to_char(end));
+                    for c in text.chars() {
+                        match c {
+                            '\t' => queue!(w, Print("   "))?,
+                            '\n' => {
+                                queue!(w, MoveToNextLine(1),
+                                    Print(format!(
+                                        "{: >width$} ",
+                                        (line_nr as i64 - self.pos.y as i64).abs(),
+                                        width = self.line_nr_cols - 1
+                                    ))
+                                )?;
+                                line_nr += 1;
                             }
-                        },
-                        HighlightEvent::HighlightStart(s) => {
-                            let style = hl_styles[s.0];
-                            queue!(w, SetBackgroundColor(style.background_color.unwrap()))?;
-                            queue!(w, SetForegroundColor(style.foreground_color.unwrap()))?;
-                            queue!(w, SetAttributes(style.attributes))?;
-                        },
-                        HighlightEvent::HighlightEnd => {
-                            queue!(w, ResetColor)?;
-                        },
+                            _ => queue!(w, Print(c))?,
+                        }
                     }
-                }
+                },
+                HighlightEvent::HighlightStart(s) => {
+                    //let style = hl_styles[s.0];
+                    //queue!(w, SetBackgroundColor(style.background_color.unwrap()))?;
+                    //queue!(w, SetForegroundColor(style.foreground_color.unwrap()))?;
+                    //queue!(w, SetAttributes(style.attributes))?;
+                },
+                HighlightEvent::HighlightEnd => queue!(w, ResetColor)?,
+                
             }
         }
-
         //let visible = self.content.lines[self.offset.y]..self.content.lines[usize::min(self.offset.y + self.height, self.content.len())];
         
         queue!(
@@ -349,7 +356,7 @@ impl Buffer {
 
     /// Recalculate the necessary number of columns needed to display line numbers for the buffer
     pub fn update_line_nr_cols(&mut self) {
-        self.line_nr_cols = self.content.len().to_string().len() + 1;
+        self.line_nr_cols = self.content.len_lines().to_string().len() + 1;
     }
 
     pub fn move_cursor(&mut self, movement_type: Movement) {
@@ -362,8 +369,8 @@ impl Buffer {
         }
     }
 
-    fn max_col(&self, y: usize) -> usize {
-        self.content.line_len(y) - 1
+    fn max_col(&self, line: usize) -> usize {
+        self.content.line(line).len_chars() - 1
     }
 
     fn get_destination(&self, movement_type: Movement) -> Pos {
@@ -374,7 +381,7 @@ impl Buffer {
                 Pos::new(x, y)
             }
             Movement::Down(amount) => {
-                let y = usize::min(self.pos.y + amount, self.content.len().saturating_sub(1));
+                let y = usize::min(self.pos.y + amount, self.content.len_lines().saturating_sub(1));
                 let x = usize::min(self.max_col(y), self.saved_col);
                 Pos::new(x, y)
             }
@@ -475,7 +482,7 @@ impl Buffer {
             EditMode::Insert => match key_event.code {
                 KeyCode::Char(c) => {
                     let mut tmp = [0u8; 4];
-                    self.content.insert(self.pos, c.encode_utf8(&mut tmp));
+                    self.content.insert(self.pos_to_index(self.pos), c.encode_utf8(&mut tmp));
                     self.move_cursor(Movement::Right(1));
                 }
                 KeyCode::Esc => {
@@ -491,6 +498,7 @@ impl Buffer {
                 KeyCode::PageUp => self.move_cursor(Movement::Up(self.height / 2)),
                 KeyCode::PageDown => self.move_cursor(Movement::Down(self.height / 2)),
                 KeyCode::Backspace => {
+                    
                     let right = self.content.index_from_pos(self.pos).unwrap();
                     let left = right.saturating_sub(1);
                     self.content.delete(Bounds::new(left, right));
@@ -551,6 +559,7 @@ impl Buffer {
 #[cfg(test)]
 mod test {
     use super::{Buffer, Pos, Content};
+    use ropey::Rope;
 
     fn get_buffer() -> Buffer {
         let content = Content::new(
@@ -581,5 +590,11 @@ mod test {
         assert_eq!(Content { raw: "test\nhallo\n".to_string(), lines: vec![0, 5, 11] }, content);
         content.insert(Pos::new(4, 0), "\n");
         assert_eq!(Content { raw: "test\n\nhallo\n".to_string(), lines: vec![0, 5, 6, 12] }, content);
+    }
+
+    #[test]
+    fn test_ropey() {
+        let rope = Rope::from_str("test\nhallo\n");
+        assert_eq!("test\nhallo\n", rope)
     }
 }
