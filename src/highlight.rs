@@ -1,4 +1,4 @@
-use tree_sitter_highlight::{Highlighter, HighlightConfiguration, HighlightEvent};
+use tree_sitter_highlight::{HighlightConfiguration};
 use std::path::Path;
 
 const HIGHLIGHT_NAMES: &[&'static str; 18] = &[
@@ -33,12 +33,12 @@ pub fn get_hl_conf(path: &Path) -> Option<HighlightConfiguration> {
                     tree_sitter_rust::HIGHLIGHT_QUERY,
                     "",
                     "").unwrap(),
-                _ => return None,
                 "toml" => HighlightConfiguration::new(
                     tree_sitter_toml::language(),
                     tree_sitter_toml::HIGHLIGHT_QUERY,
                     "",
                     "").unwrap(),
+                _ => return None,
             }
         }
     };

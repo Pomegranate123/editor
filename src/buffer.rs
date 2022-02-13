@@ -6,13 +6,13 @@ use crossterm::{
     },
     event::{DisableMouseCapture, KeyCode, KeyEvent},
     execute, queue,
-    style::{Print, PrintStyledContent, ContentStyle, SetBackgroundColor, SetForegroundColor, SetAttributes, Color, Attributes, Attribute, ResetColor},
+    style::{Print, ResetColor},
     terminal::{self, Clear, ClearType, EnableLineWrap, LeaveAlternateScreen},
     Result,
 };
 use tree_sitter_highlight::{Highlighter, HighlightConfiguration, HighlightEvent};
 use ropey::Rope;
-use std::{fs::{self, File}, io::{Write, BufWriter, BufReader}, path::PathBuf, process};
+use std::{fs::File, io::{Write, BufWriter, BufReader}, path::PathBuf, process, ops::Range};
 
 #[derive(Clone, Copy)]
 pub enum EditMode {
@@ -42,101 +42,6 @@ impl Pos {
 impl Default for Pos {
     fn default() -> Self {
         Self { x: 0, y: 0 }
-    }
-}
-
-pub struct Bounds {
-    pub left: usize,
-    pub right: usize,
-}
-
-impl Bounds {
-    pub fn new(i: usize, j: usize) -> Self {
-        if i < j {
-            Self {
-                left: i,
-                right: j,
-            }
-        } else {
-            Self {
-                left: j,
-                right: i,
-            }
-        }
-    }
-
-    pub fn from_delimiters(i: usize, j: usize, inclusive: bool) -> Self {
-        let mut bounds = Self::new(i, j);
-        match inclusive {
-            true => bounds.right += 1,
-            false => bounds.left += 1,
-        }
-        bounds
-    }
-}
-
-#[derive(PartialEq, Eq, Debug)]
-pub struct Content {
-    raw: String,
-    lines: Vec<usize>,
-}
-
-impl Content {
-    pub fn new(raw: String) -> Self {
-        let lines = std::iter::once(0).chain(raw.match_indices("\n").map(|(i, _)| i + 1)).collect();
-        eprintln!("{}", raw);
-        Self { raw, lines }
-    }
-
-    // Returns line length including \n char
-    pub fn line_len(&self, y: usize) -> usize {
-        self.lines[y + 1] - self.lines[y]
-    }
-
-    pub fn len(&self) -> usize {
-        self.lines.len() - 1
-    }
-
-    // test\nhallo\n,  vec![0, 5, 11]
-    // test\n\nhallo\n
-    pub fn insert(&mut self, pos: Pos, text: &str) {
-        let index = self.index_from_pos(pos).unwrap();
-        self.raw.insert_str(index, text);
-        self.lines = std::iter::once(0).chain(self.raw.match_indices("\n").map(|(i, _)| i + 1)).collect();
-    }
-
-    pub fn delete(&mut self, b: Bounds) {
-        self.raw.replace_range(b.left..b.right, "");
-        self.lines = std::iter::once(0).chain(self.raw.match_indices("\n").map(|(i, _)| i + 1)).collect();
-    }
-    
-    fn index_from_pos(&self, pos: Pos) -> Option<usize> {
-        //TODO: Check if pos.x is within bounds
-        self.lines.get(pos.y).map(|index| { index + pos.x })
-    }
-
-    fn pos_from_index(&self, index: usize) -> Option<Pos> {
-        if index >= self.raw.len() { None }
-        else {
-            let y = self.lines.iter().position(|&i| i > index).unwrap() - 1;
-            let x = index - self.lines[y];
-            Some(Pos::new(x, y))
-        }
-    }
-
-    fn find(&self, _c: char) -> Option<usize> {
-        unimplemented!()
-    }
-
-    fn rfind(&self, _c: char) -> Option<usize> {
-        unimplemented!()
-    }
-
-}
-
-impl Default for Content {
-    fn default() -> Self {
-        Self { raw: String::from("\n"), lines: vec![0, 1] }
     }
 }
 
@@ -173,7 +78,7 @@ pub struct Buffer {
 impl Buffer {
     pub fn new(path: PathBuf) -> Self {
         let (width, height) = terminal::size().unwrap();
-        let content = Rope::from_reader(BufReader::new(File::open(path).unwrap())).unwrap();
+        let content = Rope::from_reader(BufReader::new(File::open(&path).unwrap())).unwrap();
         let line_nr_cols = content.len_lines().to_string().len() + 1;
         let hl_conf = highlight::get_hl_conf(&path);
 
@@ -222,28 +127,48 @@ impl Buffer {
         Ok(())
     }
 
-    // pub fn bounds(&self, sel: Selection) -> Option<Bounds> {
-    //     Some(match sel {
-    //         Selection::Lines(amount) => {
-    //             Bounds::new(self.content.index_from_pos(Pos::new(0, self.pos.y)).unwrap(), self.content.index_from_pos(Pos::new(0, self.pos.y + amount)).unwrap())
-    //         }
-    //         Selection::UpTo(mov) => Bounds::new(self.content.index_from_pos(self.pos).unwrap(), self.content.index_from_pos(self.get_destination(mov)).unwrap()),
-    //         Selection::Between {
-    //             first,
-    //             last,
-    //             inclusive,
-    //         } => match (self.content.rfind(first), self.content.find(last)) {
-    //             (Some(pos1), Some(pos2)) => Bounds::from_delimiters(pos1, pos2, inclusive),
-    //             _ => return None,
-    //         },
-    //         Selection::Word { inclusive: _ } => return None,
-    //         Selection::Paragraph { inclusive: _ } => return None,
-    //     })
-    // }
+    fn bounds(&self, sel: Selection) -> Range<usize> {
+        match sel {
+            Selection::Lines(amount) => {
+                let start = self.content.line_to_char(self.row());
+                let dest = usize::min(self.row() + amount, self.content.len_lines());
+                let end = self.content.line_to_char(dest) + self.max_col(dest);
+                start..end
+            }
+            Selection::UpTo(mov) => {
+                self.idx..self.get_destination(mov)
+            }
+            Selection::Between {
+                first,
+                last,
+                inclusive,
+            } => 0..0,
+            Selection::Word { inclusive: _ } => 0..0,
+            Selection::Paragraph { inclusive: _ } => 0..0,
+        }
+    }
+
+    fn execute<W: Write>(&mut self, w: &mut W, command: Command) -> Result<()> {
+        match command {
+            Command::Undo => (), //buffer.undo(),
+            Command::Redo => (), //buffer.redo(),
+            Command::Move(dir) => self.move_cursor(dir),
+            Command::Delete(sel) => self.content.remove(self.bounds(sel)),
+            Command::Yank(_sel) => (), //buffer.copy(sel),
+            Command::Paste => (),      //buffer.paste(plc),
+            Command::CreateNewLine => {
+                self.content.insert(self.idx, "\n");
+                self.update_line_nr_cols();
+            },
+            Command::SetMode(mode) => self.set_mode(w, mode)?,
+        }
+        Ok(())
+    }
+
 
     /// Saves the current state of the buffer to the file
     fn save(&mut self) -> Result<()> {
-        self.content.write_to(BufWriter::new(File::create(self.path)?));
+        self.content.write_to(BufWriter::new(File::create(&self.path)?));
         self.status = format!(
             "\"{}\" {}L, {}C written",
             self.path.to_str().unwrap(),
@@ -294,19 +219,24 @@ impl Buffer {
 
         queue!(w, Print(format!(
             "{: >width$} ",
-            self.pos.y,
+            self.row(),
             width = self.line_nr_cols - 1
         )))?;
         let mut line_nr = 1;
-        let bytes = self.content.bytes().collect::<Vec<u8>>();
+
+
+        let last_line = self.offset.y + self.height - 3;
+        let rendered = self.content.line_to_char(self.offset.y)..(self.content.line_to_char(last_line) + self.max_col(last_line));
+        let rendered_text = self.content.slice(rendered);
+        let bytes = rendered_text.bytes().collect::<Vec<u8>>();
         for event in hl.highlight(
-            &self.hl_conf.unwrap(),
+            self.hl_conf.as_ref().unwrap(),
             &bytes,
             None,
             |_| None).unwrap() {
             match event.unwrap() {
                 HighlightEvent::Source {start, end} => {
-                    let text = self.content.slice(self.content.byte_to_char(start)..self.content.byte_to_char(end));
+                    let text = rendered_text.slice(self.content.byte_to_char(start)..self.content.byte_to_char(end));
                     for c in text.chars() {
                         match c {
                             '\t' => queue!(w, Print("   "))?,
@@ -314,7 +244,7 @@ impl Buffer {
                                 queue!(w, MoveToNextLine(1),
                                     Print(format!(
                                         "{: >width$} ",
-                                        (line_nr as i64 - self.pos.y as i64).abs(),
+                                        (line_nr as i64 - self.row() as i64).abs(),
                                         width = self.line_nr_cols - 1
                                     ))
                                 )?;
@@ -342,8 +272,8 @@ impl Buffer {
             Print(format!(
                 "{: <width$} {: >3}:{: <3}",
                 self.path.to_str().unwrap(),
-                self.pos.y,
-                self.pos.x,
+                self.row(),
+                self.col(),
                 width = self.width - 9
             )),
             MoveTo(0, self.height as u16 - 1),
@@ -360,41 +290,39 @@ impl Buffer {
     }
 
     pub fn move_cursor(&mut self, movement_type: Movement) {
-        self.pos = self.get_destination(movement_type);
+        self.idx = self.get_destination(movement_type);
         match movement_type {
             Movement::Left(_) | Movement::Right(_) | Movement::Home | Movement::End => {
-                self.saved_col = self.pos.x
+                self.saved_col = self.col();
             }
             _ => (),
         }
     }
 
     fn max_col(&self, line: usize) -> usize {
-        self.content.line(line).len_chars() - 1
+        self.content.line(line).len_chars().saturating_sub(1)
     }
 
-    fn get_destination(&self, movement_type: Movement) -> Pos {
+    fn get_destination(&self, movement_type: Movement) -> usize {
         match movement_type {
             Movement::Up(amount) => {
-                let y = self.pos.y.saturating_sub(amount);
+                let y = self.row().saturating_sub(amount);
                 let x = usize::min(self.max_col(y), self.saved_col);
-                Pos::new(x, y)
+                self.content.line_to_char(y) + x
             }
             Movement::Down(amount) => {
-                let y = usize::min(self.pos.y + amount, self.content.len_lines().saturating_sub(1));
+                let y = usize::min(self.row() + amount, self.content.len_lines().saturating_sub(1));
                 let x = usize::min(self.max_col(y), self.saved_col);
-                Pos::new(x, y)
+                self.content.line_to_char(y) + x
             }
             Movement::Left(amount) => {
-                let x = self.pos.x.saturating_sub(amount);
-                Pos::new(x, self.pos.y)
+                usize::max(self.idx.saturating_sub(amount), self.content.line_to_char(self.row()))
             }
             Movement::Right(amount) => {
-                let x = usize::min(self.pos.x + amount, self.max_col(self.pos.y));
-                Pos::new(x, self.pos.y)
+                usize::min(self.idx + amount, self.content.line_to_char(self.row()) + self.max_col(self.row()))
             }
-            Movement::Home => Pos::new(0, self.pos.y),
-            Movement::End => Pos::new(self.max_col(self.pos.y), self.pos.y),
+            Movement::Home => self.content.line_to_char(self.row()),
+            Movement::End => self.content.line_to_char(self.row()) + self.max_col(self.row()),
             Movement::FirstChar => {
                 unimplemented!()
                 // Pos::new(
@@ -406,12 +334,12 @@ impl Buffer {
             Movement::Top => {
                 let y = self.offset.x + 3;
                 let x = usize::min(self.max_col(y), self.saved_col);
-                Pos::new(x, y)
+                self.content.line_to_char(y) + x
             }
             Movement::Bottom => {
                 let y = self.offset.x + self.height - 3;
                 let x = usize::min(self.max_col(y), self.saved_col);
-                Pos::new(x, y)
+                self.content.line_to_char(y) + x
             }
             Movement::NextWord(_amount) => {
                 unimplemented!()
@@ -429,26 +357,26 @@ impl Buffer {
             }
             _ => {
                 // Scroll left if cursor is on left side of bounds
-                if self.pos.x.saturating_sub(self.offset.x) < 5 {
-                    self.offset.x = self.pos.x.saturating_sub(5);
+                if self.col().saturating_sub(self.offset.x) < 5 {
+                    self.offset.x = self.col().saturating_sub(5);
                 }
                 // Scroll right if cursor is on right side of bounds
-                if self.pos.x.saturating_sub(self.offset.x) + self.line_nr_cols + 5 + 1 > self.width {
-                    self.offset.x = (self.pos.x + self.line_nr_cols + 5 + 1).saturating_sub(self.width);
+                if self.col().saturating_sub(self.offset.x) + self.line_nr_cols + 5 + 1 > self.width {
+                    self.offset.x = (self.col() + self.line_nr_cols + 5 + 1).saturating_sub(self.width);
                 }
                 // Scroll up if cursor is above bounds
-                if self.pos.y.saturating_sub(self.offset.y) < 3 {
-                    self.offset.y = self.pos.y.saturating_sub(3);
+                if self.row().saturating_sub(self.offset.y) < 3 {
+                    self.offset.y = self.row().saturating_sub(3);
                 }
                 // Scroll down if cursor is below bounds
-                if self.pos.y.saturating_sub(self.offset.y) + 3 + 2 > self.height {
-                    self.offset.y = (self.pos.y + 3 + 2).saturating_sub(self.height);
+                if self.row().saturating_sub(self.offset.y) + 3 + 2 > self.height {
+                    self.offset.y = (self.row() + 3 + 2).saturating_sub(self.height);
                 }
                 queue!(
                     w,
                     MoveTo(
-                        (self.pos.x - self.offset.x + self.line_nr_cols) as u16,
-                        (self.pos.y - self.offset.y) as u16
+                        (self.col() - self.offset.x + self.line_nr_cols) as u16,
+                        (self.row() - self.offset.y) as u16
                     )
                 )?;
             }
@@ -475,14 +403,14 @@ impl Buffer {
                 if let Some(commands) = Command::parse(&self.status) {
                     self.command.clear();
                     for com in commands {
-                        com.execute(w, self)?;
+                        self.execute(w, com)?;
                     }
                 }
             }
             EditMode::Insert => match key_event.code {
                 KeyCode::Char(c) => {
                     let mut tmp = [0u8; 4];
-                    self.content.insert(self.pos_to_index(self.pos), c.encode_utf8(&mut tmp));
+                    self.content.insert(self.idx, c.encode_utf8(&mut tmp));
                     self.move_cursor(Movement::Right(1));
                 }
                 KeyCode::Esc => {
@@ -498,19 +426,15 @@ impl Buffer {
                 KeyCode::PageUp => self.move_cursor(Movement::Up(self.height / 2)),
                 KeyCode::PageDown => self.move_cursor(Movement::Down(self.height / 2)),
                 KeyCode::Backspace => {
-                    
-                    let right = self.content.index_from_pos(self.pos).unwrap();
-                    let left = right.saturating_sub(1);
-                    self.content.delete(Bounds::new(left, right));
-                    self.pos = self.content.pos_from_index(left).unwrap();
+                    self.content.remove(self.idx.saturating_sub(1)..self.idx);
+                    self.idx = self.idx.saturating_sub(1);
                 }
                 KeyCode::Delete => {
-                    let index = self.content.index_from_pos(self.pos).unwrap();
-                    self.content.delete(Bounds::new(index, index + 1));
+                    self.content.remove(self.idx..self.idx + 1);
                 }
-                KeyCode::Tab => self.content.insert(self.pos, "\t"),
+                KeyCode::Tab => self.content.insert(self.idx, "\t"),
                 KeyCode::Enter => {
-                    self.content.insert(self.pos, "\n");
+                    self.content.insert(self.idx, "\n");
                     self.move_cursor(Movement::Down(1));
                     self.move_cursor(Movement::Home);
                     self.update_line_nr_cols();
