@@ -1,7 +1,7 @@
 use crate::{command::{Command, Movement, Selection}, highlight};
 use crossterm::{
     cursor::{
-        CursorShape, Hide, MoveTo, MoveToNextLine, RestorePosition, SavePosition,
+        CursorShape, Hide, MoveTo, MoveToNextLine, RestorePosition, SavePosition, MoveToColumn,
         SetCursorShape, Show,
     },
     event::{DisableMouseCapture, KeyCode, KeyEvent},
@@ -27,24 +27,6 @@ impl Default for EditMode {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct Pos {
-    pub y: usize,
-    pub x: usize,
-}
-
-impl Pos {
-    pub fn new(x: usize, y: usize) -> Self {
-        Self { x, y }
-    }
-}
-
-impl Default for Pos {
-    fn default() -> Self {
-        Self { x: 0, y: 0 }
-    }
-}
-
 pub struct Buffer {
     /// The text contained by the buffer
     pub content: Rope,
@@ -59,7 +41,8 @@ pub struct Buffer {
     /// Whether the buffer has been edited since saving
     edited: bool,
     /// Position the buffer is scrolled to
-    offset: Pos,
+    offset_y: usize,
+    offset_x: usize,
     /// Position of cursor in buffer
     idx: usize,
     /// Saved column index for easier traversal
@@ -73,6 +56,8 @@ pub struct Buffer {
     /// The size of tab characters
     tab_size: usize,
     hl_conf: Option<HighlightConfiguration>,
+    hl: Highlighter,
+    hl_cache: Option<Vec<HighlightEvent>>,
 }
 
 impl Buffer {
@@ -94,10 +79,21 @@ impl Buffer {
             status: String::new(),
             edited: false,
             mode: EditMode::Normal,
-            offset: Pos::new(0, 0),
+            offset_y: 0,
+            offset_x: 0,
             idx: 0,
             saved_col: 0,
+            hl: Highlighter::new(),
+            hl_cache: None,
         }
+    }
+
+    fn update_highlights(&mut self) {
+        self.hl_cache = Some(self.hl.highlight(
+            self.hl_conf.as_ref().unwrap(),
+            &self.content.bytes().collect::<Vec<u8>>(),
+            None,
+            |_| None).unwrap().map(|event| event.unwrap()).collect());
     }
 
     fn row(&self) -> usize {
@@ -106,10 +102,6 @@ impl Buffer {
 
     fn col(&self) -> usize {
         self.idx - self.content.line_to_char(self.row())
-    }
-
-    fn pos_to_index(&self, pos: Pos) -> usize {
-        self.content.line_to_char(pos.y) + pos.x
     }
 
     pub fn update_size(&mut self, width: usize, height: usize) {
@@ -132,19 +124,19 @@ impl Buffer {
             Selection::Lines(amount) => {
                 let start = self.content.line_to_char(self.row());
                 let dest = usize::min(self.row() + amount, self.content.len_lines());
-                let end = self.content.line_to_char(dest) + self.max_col(dest);
+                let end = self.content.line_to_char(dest);
                 start..end
             }
             Selection::UpTo(mov) => {
                 self.idx..self.get_destination(mov)
             }
-            Selection::Between {
-                first,
-                last,
-                inclusive,
+            Selection::Between { // TODO: implement
+                first: _,
+                last: _,
+                inclusive: _,
             } => 0..0,
-            Selection::Word { inclusive: _ } => 0..0,
-            Selection::Paragraph { inclusive: _ } => 0..0,
+            Selection::Word { inclusive: _ } => 0..0, // TODO: implement
+            Selection::Paragraph { inclusive: _ } => 0..0, // TODO: implement
         }
     }
 
@@ -152,14 +144,11 @@ impl Buffer {
         match command {
             Command::Undo => (), //buffer.undo(),
             Command::Redo => (), //buffer.redo(),
-            Command::Move(dir) => self.move_cursor(dir),
-            Command::Delete(sel) => self.content.remove(self.bounds(sel)),
+            Command::Move(dir) => self.move_cursor(w, dir)?,
+            Command::Delete(sel) => self.remove(w, self.bounds(sel))?,
             Command::Yank(_sel) => (), //buffer.copy(sel),
             Command::Paste => (),      //buffer.paste(plc),
-            Command::CreateNewLine => {
-                self.content.insert(self.idx, "\n");
-                self.update_line_nr_cols();
-            },
+            Command::CreateNewLine => self.insert(w, self.idx, "\n")?,
             Command::SetMode(mode) => self.set_mode(w, mode)?,
         }
         Ok(())
@@ -168,7 +157,7 @@ impl Buffer {
 
     /// Saves the current state of the buffer to the file
     fn save(&mut self) -> Result<()> {
-        self.content.write_to(BufWriter::new(File::create(&self.path)?));
+        self.content.write_to(BufWriter::new(File::create(&self.path)?))?;
         self.status = format!(
             "\"{}\" {}L, {}C written",
             self.path.to_str().unwrap(),
@@ -192,82 +181,25 @@ impl Buffer {
         process::exit(0);
     }
 
-    pub fn draw<W: Write>(&self, w: &mut W) -> Result<()> {
-        let highlight_names = &[
-            "attribute",
-            "constant",
-            "function.builtin",
-            "function",
-            "keyword",
-            "operator",
-            "property",
-            "punctuation",
-            "punctuation.bracket",
-            "punctuation.delimiter",
-            "string",
-            "string.special",
-            "tag",
-            "type",
-            "type.builtin",
-            "variable",
-            "variable.builtin",
-            "variable.parameter",
-        ];
-
-        let mut hl = Highlighter::new();
-        queue!(w, SavePosition, Hide, MoveTo(0, 0), Clear(ClearType::All))?;
-
-        queue!(w, Print(format!(
-            "{: >width$} ",
-            self.row(),
-            width = self.line_nr_cols - 1
-        )))?;
-        let mut line_nr = 1;
-
-
-        let last_line = self.offset.y + self.height - 3;
-        let rendered = self.content.line_to_char(self.offset.y)..(self.content.line_to_char(last_line) + self.max_col(last_line));
-        let rendered_text = self.content.slice(rendered);
-        let bytes = rendered_text.bytes().collect::<Vec<u8>>();
-        for event in hl.highlight(
-            self.hl_conf.as_ref().unwrap(),
-            &bytes,
-            None,
-            |_| None).unwrap() {
-            match event.unwrap() {
-                HighlightEvent::Source {start, end} => {
-                    let text = rendered_text.slice(self.content.byte_to_char(start)..self.content.byte_to_char(end));
-                    for c in text.chars() {
-                        match c {
-                            '\t' => queue!(w, Print("   "))?,
-                            '\n' => {
-                                queue!(w, MoveToNextLine(1),
-                                    Print(format!(
-                                        "{: >width$} ",
-                                        (line_nr as i64 - self.row() as i64).abs(),
-                                        width = self.line_nr_cols - 1
-                                    ))
-                                )?;
-                                line_nr += 1;
-                            }
-                            _ => queue!(w, Print(c))?,
-                        }
-                    }
-                },
-                HighlightEvent::HighlightStart(s) => {
-                    //let style = hl_styles[s.0];
-                    //queue!(w, SetBackgroundColor(style.background_color.unwrap()))?;
-                    //queue!(w, SetForegroundColor(style.foreground_color.unwrap()))?;
-                    //queue!(w, SetAttributes(style.attributes))?;
-                },
-                HighlightEvent::HighlightEnd => queue!(w, ResetColor)?,
-                
-            }
+    fn draw_line_nrs<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        self.line_nr_cols = self.content.len_lines().to_string().len() + 1;
+        queue!(w, SavePosition, Hide, MoveTo(0, 0))?;      
+        for line_nr in 0..(self.height-2) {
+            queue!(w, Print(format!(
+                "{: >width$} ",
+                (line_nr as i64 - (self.row() - self.offset_y) as i64).abs(),
+                width = self.line_nr_cols - 1
+            )), MoveToNextLine(1))?;
         }
-        //let visible = self.content.lines[self.offset.y]..self.content.lines[usize::min(self.offset.y + self.height, self.content.len())];
-        
+        queue!(w, RestorePosition, Show)?;
+        Ok(())
+    }
+
+    fn draw_status_bar<W: Write>(&mut self, w: &mut W) -> Result<()> {
         queue!(
             w,
+            SavePosition,
+            Hide,
             MoveTo(0, self.height as u16 - 2),
             Print(format!(
                 "{: <width$} {: >3}:{: <3}",
@@ -277,19 +209,73 @@ impl Buffer {
                 width = self.width - 9
             )),
             MoveTo(0, self.height as u16 - 1),
-            Print(&self.status)
-        )?;
-        queue!(w, RestorePosition, Show)?;
-        w.flush()?;
+            Print(&self.status),
+            RestorePosition,
+            Show
+        )
+    }
+
+    pub fn draw_all<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        self.draw_line_nrs(w)?;
+        self.draw_status_bar(w)?;
+        self.draw(w, self.content.line_to_char(self.offset_y))?;
         Ok(())
     }
 
-    /// Recalculate the necessary number of columns needed to display line numbers for the buffer
-    pub fn update_line_nr_cols(&mut self) {
-        self.line_nr_cols = self.content.len_lines().to_string().len() + 1;
+    pub fn draw<W: Write>(&mut self, w: &mut W, begin: usize) -> Result<()> {
+        self.draw_status_bar(w)?;
+
+        let row = self.content.char_to_line(begin);
+        let col = begin - self.content.line_to_char(row);
+
+        queue!(w,
+            SavePosition,
+            Hide,
+            MoveTo(
+                (col - self.offset_x + self.line_nr_cols) as u16,
+                (row - self.offset_y) as u16
+            ),
+            Clear(ClearType::UntilNewLine)
+            )?;
+
+        if self.hl_cache.is_none() {
+            self.update_highlights();
+        }
+
+        let last_line = self.offset_y + self.height - 3;
+        let rendered = begin..(self.content.line_to_char(last_line) + self.max_col(last_line));
+        for event in self.hl_cache.as_ref().unwrap() {
+            match event {
+                HighlightEvent::Source {start, end} => {
+                    let mut first = usize::max(*start, rendered.start);
+                    let last = usize::min(*end, rendered.end);
+                    if first > last { first = last; };
+                    let mut lines = self.content.slice(self.content.byte_to_char(first)..self.content.byte_to_char(last)).lines();
+                    if let Some(line) = lines.next() {
+                        queue!(w, Print(line))?;
+                        for line in lines {
+                            queue!(w,
+                            MoveToColumn(self.line_nr_cols as u16 + 1),
+                            Clear(ClearType::UntilNewLine),
+                            Print(line))?;
+                        }
+                    }
+                },
+                HighlightEvent::HighlightStart(_s) => {
+                    //let style = hl_styles[s.0];
+                    //queue!(w, SetBackgroundColor(style.background_color.unwrap()))?;
+                    //queue!(w, SetForegroundColor(style.foreground_color.unwrap()))?;
+                    //queue!(w, SetAttributes(style.attributes))?;
+                },
+                HighlightEvent::HighlightEnd => queue!(w, ResetColor)?,
+            }
+        }
+        
+        queue!(w, RestorePosition, Show)?;
+        Ok(())
     }
 
-    pub fn move_cursor(&mut self, movement_type: Movement) {
+    pub fn move_cursor<W: Write>(&mut self, w: &mut W, movement_type: Movement) -> Result<()> {
         self.idx = self.get_destination(movement_type);
         match movement_type {
             Movement::Left(_) | Movement::Right(_) | Movement::Home | Movement::End => {
@@ -297,6 +283,7 @@ impl Buffer {
             }
             _ => (),
         }
+        self.update_cursor(w)
     }
 
     fn max_col(&self, line: usize) -> usize {
@@ -325,19 +312,14 @@ impl Buffer {
             Movement::End => self.content.line_to_char(self.row()) + self.max_col(self.row()),
             Movement::FirstChar => {
                 unimplemented!()
-                // Pos::new(
-                // self.content[self.pos.y]
-                //     .find(|c| !char::is_whitespace(c))
-                //     .unwrap_or(self.content.lines[self.pos.y]),
-                // self.pos.y,
             }
             Movement::Top => {
-                let y = self.offset.x + 3;
+                let y = self.offset_x + 3;
                 let x = usize::min(self.max_col(y), self.saved_col);
                 self.content.line_to_char(y) + x
             }
             Movement::Bottom => {
-                let y = self.offset.x + self.height - 3;
+                let y = self.offset_x + self.height - 3;
                 let x = usize::min(self.max_col(y), self.saved_col);
                 self.content.line_to_char(y) + x
             }
@@ -357,31 +339,54 @@ impl Buffer {
             }
             _ => {
                 // Scroll left if cursor is on left side of bounds
-                if self.col().saturating_sub(self.offset.x) < 5 {
-                    self.offset.x = self.col().saturating_sub(5);
+                if self.col().saturating_sub(self.offset_x) < 5 {
+                    self.offset_x = self.col().saturating_sub(5);
                 }
                 // Scroll right if cursor is on right side of bounds
-                if self.col().saturating_sub(self.offset.x) + self.line_nr_cols + 5 + 1 > self.width {
-                    self.offset.x = (self.col() + self.line_nr_cols + 5 + 1).saturating_sub(self.width);
+                if self.col().saturating_sub(self.offset_x) + self.line_nr_cols + 5 + 1 > self.width {
+                    self.offset_x = (self.col() + self.line_nr_cols + 5 + 1).saturating_sub(self.width);
                 }
                 // Scroll up if cursor is above bounds
-                if self.row().saturating_sub(self.offset.y) < 3 {
-                    self.offset.y = self.row().saturating_sub(3);
+                if self.row().saturating_sub(self.offset_y) < 3 {
+                    let scroll_y = self.row().saturating_sub(3);
+                    //queue!(w, ScrollDown((self.offset_y - scroll_y) as u16))?;
+                    self.offset_y = scroll_y;
+                    //self.draw(w, self.idx)?;
+                    self.draw_all(w)?;
                 }
                 // Scroll down if cursor is below bounds
-                if self.row().saturating_sub(self.offset.y) + 3 + 2 > self.height {
-                    self.offset.y = (self.row() + 3 + 2).saturating_sub(self.height);
+                if self.row().saturating_sub(self.offset_y) + 3 + 2 > self.height {
+                    let scroll_y = (self.row() + 3 + 2).saturating_sub(self.height);
+                    //queue!(w, ScrollUp((scroll_y - self.offset_y) as u16))?;
+                    self.offset_y = scroll_y;
+                    //self.draw(w, self.idx)?;
+                    self.draw_all(w)?;
                 }
                 queue!(
                     w,
                     MoveTo(
-                        (self.col() - self.offset.x + self.line_nr_cols) as u16,
-                        (self.row() - self.offset.y) as u16
+                        (self.col() - self.offset_x + self.line_nr_cols) as u16,
+                        (self.row() - self.offset_y) as u16
                     )
                 )?;
             }
         }
+        w.flush()?;
         Ok(())
+    }
+
+    fn insert<W: Write>(&mut self, w: &mut W, i: usize, text: &str) -> Result<()> {
+        self.content.insert(i, text);
+        self.draw(w, self.idx)
+        //self.draw_all(w)
+    }
+
+    fn remove<W: Write>(&mut self, w: &mut W, range: Range<usize>) -> Result<()> {
+        self.idx = range.start;
+        self.content.remove(range);
+        self.update_cursor(w)?;
+        self.draw(w, self.idx)
+        //self.draw_all(w)
     }
 
     pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
@@ -410,34 +415,28 @@ impl Buffer {
             EditMode::Insert => match key_event.code {
                 KeyCode::Char(c) => {
                     let mut tmp = [0u8; 4];
-                    self.content.insert(self.idx, c.encode_utf8(&mut tmp));
-                    self.move_cursor(Movement::Right(1));
+                    self.insert(w, self.idx, c.encode_utf8(&mut tmp))?;
+                    self.move_cursor(w, Movement::Right(1))?;
                 }
                 KeyCode::Esc => {
                     self.set_mode(w, EditMode::Normal)?;
-                    self.move_cursor(Movement::Left(1));
+                    self.move_cursor(w, Movement::Left(1))?;
                 }
-                KeyCode::Up => self.move_cursor(Movement::Up(1)),
-                KeyCode::Down => self.move_cursor(Movement::Down(1)),
-                KeyCode::Left => self.move_cursor(Movement::Left(1)),
-                KeyCode::Right => self.move_cursor(Movement::Right(1)),
-                KeyCode::Home => self.move_cursor(Movement::Home),
-                KeyCode::End => self.move_cursor(Movement::End),
-                KeyCode::PageUp => self.move_cursor(Movement::Up(self.height / 2)),
-                KeyCode::PageDown => self.move_cursor(Movement::Down(self.height / 2)),
-                KeyCode::Backspace => {
-                    self.content.remove(self.idx.saturating_sub(1)..self.idx);
-                    self.idx = self.idx.saturating_sub(1);
-                }
-                KeyCode::Delete => {
-                    self.content.remove(self.idx..self.idx + 1);
-                }
-                KeyCode::Tab => self.content.insert(self.idx, "\t"),
+                KeyCode::Up => self.move_cursor(w, Movement::Up(1))?,
+                KeyCode::Down => self.move_cursor(w, Movement::Down(1))?,
+                KeyCode::Left => self.move_cursor(w, Movement::Left(1))?,
+                KeyCode::Right => self.move_cursor(w, Movement::Right(1))?,
+                KeyCode::Home => self.move_cursor(w, Movement::Home)?,
+                KeyCode::End => self.move_cursor(w, Movement::End)?,
+                KeyCode::PageUp => self.move_cursor(w, Movement::Up(self.height / 2))?,
+                KeyCode::PageDown => self.move_cursor(w, Movement::Down(self.height / 2))?,
+                KeyCode::Backspace => self.remove(w, self.idx.saturating_sub(1)..self.idx)?,
+                KeyCode::Delete => self.remove(w, self.idx..self.idx + 1)?,
+                KeyCode::Tab => self.insert(w, self.idx, "\t")?,
                 KeyCode::Enter => {
-                    self.content.insert(self.idx, "\n");
-                    self.move_cursor(Movement::Down(1));
-                    self.move_cursor(Movement::Home);
-                    self.update_line_nr_cols();
+                    self.insert(w, self.idx, "\n")?;
+                    self.move_cursor(w, Movement::Down(1))?;
+                    self.move_cursor(w, Movement::Home)?;
                 }
                 _ => (),
             },
@@ -468,13 +467,14 @@ impl Buffer {
                             self.save()?;
                             self.quit(w)?;
                         }
+                        "r" => self.draw_all(w)?,
                         _ => self.status = format!("Error: invalid command ({})", self.status),
                     }
                 }
                 _ => (),
             },
         }
-        self.update_cursor(w)?;
+        w.flush()?;
         Ok(())
     }
 
@@ -482,7 +482,7 @@ impl Buffer {
 
 #[cfg(test)]
 mod test {
-    use super::{Buffer, Pos, Content};
+    use super::{Buffer, Content};
     use ropey::Rope;
 
     fn get_buffer() -> Buffer {

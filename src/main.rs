@@ -46,7 +46,7 @@ fn run<W: Write>(w: &mut W) -> Result<()> {
         DisableLineWrap,
     )?;
 
-    editor.buffer().draw(w)?;
+    editor.draw(w)?;
     loop {
         match event::read()? {
             Event::Resize(width, height) => {
@@ -83,8 +83,8 @@ impl Editor {
         self.height = height;
     }
 
-    pub fn draw<W: Write>(&self, w: &mut W) -> Result<()> {
-        self.buffer().draw(w)
+    pub fn draw<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        self.buffer_mut().draw_all(w)
     }
 
     pub fn buffer(&self) -> &Buffer {
@@ -100,7 +100,6 @@ impl Editor {
     }
 
     pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
-        self.buffer_mut().handle_keyevent(w, key_event)?;
-        self.draw(w)
+        self.buffer_mut().handle_keyevent(w, key_event)
     }
 }
