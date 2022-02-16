@@ -4,3 +4,4 @@ log
 flamegraph.svg
 perf.data
 perf.data.old
+config.yml

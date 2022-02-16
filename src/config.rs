@@ -1,130 +1,250 @@
-//use serde::{Serialize, Deserialize};
-use crossterm::style::{Color, Attributes};
+use crossterm::style::{self, ContentStyle};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
+use tree_sitter_highlight::HighlightConfiguration;
 
-struct Config {
-    hl_styles: HashMap<String, Style>
+#[derive(Clone)]
+pub struct Config {
+    pub hl_types: Vec<String>,
+    pub hl_styles: Vec<ContentStyle>,
 }
 
-//#[derive(Serialize, Deserialize)]
-struct Style {
+impl Config {
+    pub fn load(file: &std::path::Path) -> Result<Config, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(file)?;
+        let conf: SerDeConfig = serde_yaml::from_str(&contents)?;
+        Ok(conf.into())
+    }
+
+    pub fn write_default(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        if file.exists() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "File already exists",
+            )));
+        }
+
+        let conf = SerDeConfig::default();
+        let contents = serde_yaml::to_string(&conf)?;
+        std::fs::create_dir_all(file.parent().unwrap())?;
+        std::fs::write(file, &contents)?;
+        Ok(())
+    }
+}
+
+impl From<SerDeConfig> for Config {
+    fn from(c: SerDeConfig) -> Self {
+        Config {
+            hl_types: c.hl.keys().cloned().collect(),
+            hl_styles: c.hl.into_values().map(ContentStyle::from).collect(),
+        }
+    }
+}
+
+pub fn get_hl_conf(path: &Path) -> Option<HighlightConfiguration> {
+    eprintln!("{}", path.extension().unwrap().to_str().unwrap());
+    let hl_conf = match path.extension() {
+        None => return None,
+        Some(extension) => match extension.to_str().unwrap() {
+            "rs" => HighlightConfiguration::new(
+                tree_sitter_rust::language(),
+                tree_sitter_rust::HIGHLIGHT_QUERY,
+                "",
+                "",
+            )
+            .unwrap(),
+            "toml" => HighlightConfiguration::new(
+                tree_sitter_toml::language(),
+                tree_sitter_toml::HIGHLIGHT_QUERY,
+                "",
+                "",
+            )
+            .unwrap(),
+            _ => return None,
+        },
+    };
+
+    Some(hl_conf)
+}
+
+#[derive(Serialize, Deserialize)]
+struct SerDeConfig {
+    hl: HashMap<String, Style>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Style {
     fg: Option<Color>,
     bg: Option<Color>,
-    attr: Option<Attributes>
+    attr: Attributes,
+}
+
+impl Style {
+    fn new() -> Self {
+        Style {
+            fg: None,
+            bg: None,
+            attr: Attributes(vec![]),
+        }
+    }
+
+    fn fg(mut self, color: Color) -> Self {
+        self.fg = Some(color);
+        self
+    }
+
+    fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
+        self
+    }
+
+    fn attr(mut self, attr: Attribute) -> Self {
+        self.attr.0.push(attr);
+        self
+    }
+}
+
+impl From<Style> for ContentStyle {
+    fn from(s: Style) -> ContentStyle {
+        ContentStyle {
+            foreground_color: s.fg.map(style::Color::from),
+            background_color: s.bg.map(style::Color::from),
+            attributes: s.attr.into(),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+enum Attribute {
+    Bold,
+    Italic,
+    Underlined,
+    Dim,
+    Reversed,
+    Hidden,
+    CrossedOut,
+}
+
+impl From<Attribute> for style::Attribute {
+    fn from(a: Attribute) -> style::Attribute {
+        match a {
+            Attribute::Bold => style::Attribute::Bold,
+            Attribute::Italic => style::Attribute::Italic,
+            Attribute::Underlined => style::Attribute::Underlined,
+            Attribute::Dim => style::Attribute::Dim,
+            Attribute::Reversed => style::Attribute::Reverse,
+            Attribute::Hidden => style::Attribute::Hidden,
+            Attribute::CrossedOut => style::Attribute::CrossedOut,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Attributes(Vec<Attribute>);
+
+impl From<Attributes> for style::Attributes {
+    fn from(a: Attributes) -> style::Attributes {
+        let mut attributes = style::Attributes::default();
+        for attribute in a.0 {
+            attributes.set(attribute.into())
+        }
+        attributes
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+enum Color {
+    Reset,
+    Black,
+    DarkGrey,
+    Red,
+    DarkRed,
+    Green,
+    DarkGreen,
+    Yellow,
+    DarkYellow,
+    Blue,
+    DarkBlue,
+    Magenta,
+    DarkMagenta,
+    Cyan,
+    DarkCyan,
+    White,
+    Grey,
+    Rgb { r: u8, g: u8, b: u8 },
+    AnsiValue(u8),
+}
+
+impl From<Color> for style::Color {
+    fn from(c: Color) -> style::Color {
+        match c {
+            Color::Reset => style::Color::Reset,
+            Color::Black => style::Color::Black,
+            Color::DarkGrey => style::Color::DarkGrey,
+            Color::Red => style::Color::Red,
+            Color::DarkRed => style::Color::DarkRed,
+            Color::Green => style::Color::Green,
+            Color::DarkGreen => style::Color::DarkGreen,
+            Color::Yellow => style::Color::Yellow,
+            Color::DarkYellow => style::Color::DarkYellow,
+            Color::Blue => style::Color::Blue,
+            Color::DarkBlue => style::Color::DarkBlue,
+            Color::Magenta => style::Color::Magenta,
+            Color::DarkMagenta => style::Color::DarkMagenta,
+            Color::Cyan => style::Color::Cyan,
+            Color::DarkCyan => style::Color::DarkCyan,
+            Color::White => style::Color::White,
+            Color::Grey => style::Color::Grey,
+            Color::Rgb { r, g, b } => style::Color::Rgb { r, g, b },
+            Color::AnsiValue(v) => style::Color::AnsiValue(v),
+        }
+    }
+}
+
+impl Default for SerDeConfig {
+    fn default() -> Self {
+        let hl_types: Vec<String> = vec![
+            "attribute",
+            "constant",
+            "function.builtin",
+            "function",
+            "keyword",
+            "property",
+            "punctuation.delimiter",
+            "string",
+            "string.special",
+            "tag",
+            "type",
+            "type.builtin",
+            "variable.builtin",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let hl_styles = vec![
+            Style::new().fg(Color::Blue),
+            Style::new().fg(Color::DarkYellow),
+            Style::new().fg(Color::Blue),
+            Style::new().fg(Color::Blue),
+            Style::new().fg(Color::Magenta),
+            Style::new().fg(Color::Blue),
+            Style::new().fg(Color::DarkYellow),
+            Style::new().fg(Color::Green),
+            Style::new().fg(Color::Cyan),
+            Style::new().fg(Color::Yellow),
+            Style::new().fg(Color::Blue),
+            Style::new().fg(Color::Yellow),
+            Style::new().fg(Color::Grey),
+        ];
+        SerDeConfig {
+            hl: hl_types.into_iter().zip(hl_styles.into_iter()).collect(),
+        }
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
-        let hl_styles: HashMap<String, Style> = vec![
-            ("attribute",
-            Style {
-                fg: Some(Color::Blue),
-                bg: None,
-                attr: None,
-            }),
-            ("constant",
-            Style {
-                fg: Some(Color::DarkYellow),
-                bg: None,
-                attr: None,
-            }),
-            ("function.builtin",
-            Style {
-                fg: Some(Color::Blue),
-                bg: None,
-                attr: None,
-            }),
-            ("function",
-            Style {
-                fg: Some(Color::Blue),
-                bg: None,
-                attr: None,
-            }),
-            ("keyword",
-            Style {
-                fg: Some(Color::Magenta),
-                bg: None,
-                attr: None,
-            }),
-            ("operator",
-            Style {
-                fg: None,
-                bg: None,
-                attr: None,
-            }),
-            ("property",
-            Style {
-                fg: Some(Color::Blue),
-                bg: None,
-                attr: None,
-            }),
-            ("punctuation",
-            Style {
-                fg: None,
-                bg: None,
-                attr: None,
-            }),
-            ("punctuation.bracket",
-            Style {
-                fg: None,
-                bg: None,
-                attr: None,
-            }),
-            ("punctuation.delimiter",
-            Style {
-                fg: Some(Color::DarkYellow),
-                bg: None,
-                attr: None,
-            }),
-            ("string",
-            Style {
-                fg: Some(Color::Green),
-                bg: None,
-                attr: None,
-            }),
-            ("string.special",
-            Style {
-                fg: Some(Color::Cyan),
-                bg: None,
-                attr: None,
-            }),
-            ("tag",
-            Style {
-                fg: Some(Color::Yellow),
-                bg: None,
-                attr: None,
-            }),
-            ("type",
-            Style {
-                fg: Some(Color::Blue),
-                bg: None,
-                attr: None,
-            }),
-            ("type.builtin",
-            Style {
-                fg: Some(Color::Yellow),
-                bg: None,
-                attr: None,
-            }),
-            ("variable",
-            Style {
-                fg: None,
-                bg: None,
-                attr: None,
-            }),
-            ("variable.builtin",
-            Style {
-                fg: Some(Color::Grey),
-                bg: None,
-                attr: None,
-            }),
-            ("variable.parameter",
-            Style {
-                fg: None,
-                bg: None,
-                attr: None,
-            }),
-        ].into_iter().map(|(key, val)| (key.to_string(), val)).collect();
-        Config { hl_styles }
+        SerDeConfig::default().into()
     }
 }

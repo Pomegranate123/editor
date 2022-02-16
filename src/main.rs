@@ -1,4 +1,4 @@
-use crate::buffer::Buffer;
+use crate::{buffer::Buffer, config::Config};
 use crossterm::{
     cursor::{MoveTo, SavePosition},
     event,
@@ -13,14 +13,28 @@ use std::{
     path::PathBuf,
 };
 
-mod config;
 mod buffer;
 mod command;
-mod highlight;
+mod config;
 
 fn main() {
-    //highlight::run();
-    run(&mut io::stdout()).unwrap();
+    let config_path = PathBuf::from(match env::var("XDG_CONFIG_HOME") {
+        Ok(config_path) => config_path + "/editor/config.yml",
+        Err(_) => String::from("./config.yml"),
+    });
+    let config = match Config::load(&config_path) {
+        Ok(conf) => conf,
+        Err(e) => {
+            println!(
+                "Error: {} while trying to load config from path: {:?}",
+                e, &config_path
+            );
+            Config::write_default(&config_path).unwrap();
+            Config::default()
+        }
+    };
+
+    run(&mut io::stdout(), config).unwrap();
 }
 
 struct CleanUp;
@@ -31,10 +45,10 @@ impl Drop for CleanUp {
     }
 }
 
-fn run<W: Write>(w: &mut W) -> Result<()> {
+fn run<W: Write>(w: &mut W, config: Config) -> Result<()> {
     let _cleanup = CleanUp;
     let path = env::args().nth(1).expect("No file argument given!").into();
-    let mut editor = Editor::new(path);
+    let mut editor = Editor::new(path, config);
 
     terminal::enable_raw_mode()?;
     execute!(
@@ -61,16 +75,18 @@ fn run<W: Write>(w: &mut W) -> Result<()> {
 
 struct Editor {
     buffers: Vec<Buffer>,
+    config: Config,
     current_buffer: usize,
     width: usize,
     height: usize,
 }
 
 impl Editor {
-    pub fn new(path: PathBuf) -> Self {
+    pub fn new(path: PathBuf, config: Config) -> Self {
         let (width, height) = terminal::size().unwrap();
         Editor {
-            buffers: vec![Buffer::new(path)],
+            buffers: vec![Buffer::new(path, config.clone())],
+            config,
             current_buffer: 0,
             width: width as usize,
             height: height as usize,
