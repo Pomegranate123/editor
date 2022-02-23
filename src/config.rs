@@ -6,6 +6,8 @@ use tree_sitter_highlight::HighlightConfiguration;
 
 #[derive(Clone)]
 pub struct Config {
+    pub line_nr_active: ContentStyle,
+    pub line_nr_column: ContentStyle,
     pub hl_types: Vec<String>,
     pub hl_styles: Vec<ContentStyle>,
 }
@@ -36,6 +38,8 @@ impl Config {
 impl From<SerDeConfig> for Config {
     fn from(c: SerDeConfig) -> Self {
         Config {
+            line_nr_active: c.line_nr_active.into(),
+            line_nr_column: c.line_nr_column.into(),
             hl_types: c.hl.keys().cloned().collect(),
             hl_styles: c.hl.into_values().map(ContentStyle::from).collect(),
         }
@@ -70,6 +74,8 @@ pub fn get_hl_conf(path: &Path) -> Option<HighlightConfiguration> {
 
 #[derive(Serialize, Deserialize)]
 struct SerDeConfig {
+    line_nr_active: Style,
+    line_nr_column: Style,
     hl: HashMap<String, Style>,
 }
 
@@ -108,8 +114,8 @@ impl Style {
 impl From<Style> for ContentStyle {
     fn from(s: Style) -> ContentStyle {
         ContentStyle {
-            foreground_color: s.fg.map(style::Color::from),
-            background_color: s.bg.map(style::Color::from),
+            foreground_color: Some(s.fg.unwrap_or(Color::Reset).into()),
+            background_color: Some(s.bg.unwrap_or(Color::Reset).into()),
             attributes: s.attr.into(),
         }
     }
@@ -238,6 +244,17 @@ impl Default for SerDeConfig {
             Style::new().fg(Color::Grey),
         ];
         SerDeConfig {
+            line_nr_active: Style::new()
+                .fg(Color::White)
+                .bg(Color::Black)
+                .attr(Attribute::Bold),
+            line_nr_column: Style::new()
+                .fg(Color::Rgb {
+                    r: 80,
+                    g: 80,
+                    b: 80,
+                })
+                .bg(Color::Black),
             hl: hl_types.into_iter().zip(hl_styles.into_iter()).collect(),
         }
     }

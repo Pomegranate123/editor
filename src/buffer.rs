@@ -9,7 +9,7 @@ use crossterm::{
     },
     event::{DisableMouseCapture, KeyCode, KeyEvent},
     execute, queue,
-    style::{Print, ResetColor, SetAttributes, SetBackgroundColor, SetForegroundColor},
+    style::{Color, Print, ResetColor, SetAttributes, SetBackgroundColor, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnableLineWrap, LeaveAlternateScreen},
     Result,
 };
@@ -206,13 +206,15 @@ impl Buffer {
         self.line_nr_cols = self.content.len_lines().to_string().len() + 1;
         queue!(w, SavePosition, Hide, MoveTo(0, 0))?;
         for line_nr in 0..(self.height - 2) {
+            let mut nr = (line_nr as i64 - (self.row() - self.offset_y) as i64).abs();
+            let style = if nr == 0 { self.config.line_nr_active } else { self.config.line_nr_column };
+            if nr == 0 { nr = self.row() as i64 + 1 };
             queue!(
                 w,
-                Print(format!(
-                    "{: >width$} ",
-                    (line_nr as i64 - (self.row() - self.offset_y) as i64).abs(),
-                    width = self.line_nr_cols - 1
-                )),
+                SetBackgroundColor(style.background_color.unwrap()),
+                SetForegroundColor(style.foreground_color.unwrap()),
+                SetAttributes(style.attributes),
+                Print(format!("{: >width$} ", nr, width = self.line_nr_cols - 1)),
                 MoveToNextLine(1)
             )?;
         }
@@ -248,8 +250,6 @@ impl Buffer {
     }
 
     pub fn draw<W: Write>(&mut self, w: &mut W, begin: usize) -> Result<()> {
-        self.draw_status_bar(w)?;
-
         let row = self.content.char_to_line(begin);
         let col = begin - self.content.line_to_char(row);
 
@@ -313,18 +313,61 @@ impl Buffer {
     }
 
     pub fn move_cursor<W: Write>(&mut self, w: &mut W, movement_type: Movement) -> Result<()> {
-        self.idx = self.get_destination(movement_type);
+        self.set_cursor(w, self.get_destination(movement_type))?;
         match movement_type {
             Movement::Left(_) | Movement::Right(_) | Movement::Home | Movement::End => {
                 self.saved_col = self.col();
             }
             _ => (),
         }
-        self.update_cursor(w)
+        Ok(())
     }
 
-    fn max_col(&self, line: usize) -> usize {
-        self.content.line(line).len_chars().saturating_sub(1)
+    pub fn set_cursor<W: Write>(&mut self, w: &mut W, idx: usize) -> Result<()> {
+        self.idx = idx;
+        match self.mode {
+            EditMode::Command => {
+                queue!(w, MoveTo(self.status.len() as u16, self.height as u16 - 1))?
+            }
+            _ => {
+                // Scroll left if cursor is on left side of bounds
+                if self.col().saturating_sub(self.offset_x) < 5 {
+                    self.offset_x = self.col().saturating_sub(5);
+                }
+                // Scroll right if cursor is on right side of bounds
+                if self.col().saturating_sub(self.offset_x) + self.line_nr_cols + 5 + 1 > self.width
+                {
+                    self.offset_x =
+                        (self.col() + self.line_nr_cols + 5 + 1).saturating_sub(self.width);
+                }
+                // Scroll up if cursor is above bounds
+                if self.row().saturating_sub(self.offset_y) < 3 {
+                    let scroll_y = self.row().saturating_sub(3);
+                    //queue!(w, ScrollDown((self.offset_y - scroll_y) as u16))?;
+                    self.offset_y = scroll_y;
+                    //self.draw(w, self.idx)?;
+                    self.draw_all(w)?;
+                }
+                // Scroll down if cursor is below bounds
+                if self.row().saturating_sub(self.offset_y) + 3 + 2 > self.height {
+                    let scroll_y = (self.row() + 3 + 2).saturating_sub(self.height);
+                    //queue!(w, ScrollUp((scroll_y - self.offset_y) as u16))?;
+                    self.offset_y = scroll_y;
+                    //self.draw(w, self.idx)?;
+                    self.draw_all(w)?;
+                }
+                queue!(
+                    w,
+                    MoveTo(
+                        (self.col() - self.offset_x + self.line_nr_cols) as u16,
+                        (self.row() - self.offset_y) as u16
+                    )
+                )?;
+            }
+        }
+        self.draw_line_nrs(w)?;
+        w.flush()?;
+        Ok(())
     }
 
     fn get_destination(&self, movement_type: Movement) -> usize {
@@ -374,65 +417,21 @@ impl Buffer {
         }
     }
 
-    fn update_cursor<W: Write>(&mut self, w: &mut W) -> Result<()> {
-        match self.mode {
-            EditMode::Command => {
-                queue!(w, MoveTo(self.status.len() as u16, self.height as u16 - 1))?
-            }
-            _ => {
-                // Scroll left if cursor is on left side of bounds
-                if self.col().saturating_sub(self.offset_x) < 5 {
-                    self.offset_x = self.col().saturating_sub(5);
-                }
-                // Scroll right if cursor is on right side of bounds
-                if self.col().saturating_sub(self.offset_x) + self.line_nr_cols + 5 + 1 > self.width
-                {
-                    self.offset_x =
-                        (self.col() + self.line_nr_cols + 5 + 1).saturating_sub(self.width);
-                }
-                // Scroll up if cursor is above bounds
-                if self.row().saturating_sub(self.offset_y) < 3 {
-                    let scroll_y = self.row().saturating_sub(3);
-                    //queue!(w, ScrollDown((self.offset_y - scroll_y) as u16))?;
-                    self.offset_y = scroll_y;
-                    //self.draw(w, self.idx)?;
-                    self.draw_all(w)?;
-                }
-                // Scroll down if cursor is below bounds
-                if self.row().saturating_sub(self.offset_y) + 3 + 2 > self.height {
-                    let scroll_y = (self.row() + 3 + 2).saturating_sub(self.height);
-                    //queue!(w, ScrollUp((scroll_y - self.offset_y) as u16))?;
-                    self.offset_y = scroll_y;
-                    //self.draw(w, self.idx)?;
-                    self.draw_all(w)?;
-                }
-                queue!(
-                    w,
-                    MoveTo(
-                        (self.col() - self.offset_x + self.line_nr_cols) as u16,
-                        (self.row() - self.offset_y) as u16
-                    )
-                )?;
-            }
-        }
-        w.flush()?;
-        Ok(())
+    fn max_col(&self, line: usize) -> usize {
+        self.content.line(line).len_chars().saturating_sub(1)
     }
 
     fn insert<W: Write>(&mut self, w: &mut W, i: usize, text: &str) -> Result<()> {
         self.content.insert(i, text);
         self.update_highlights();
         self.draw(w, self.content.line_to_char(self.row()))
-        //self.draw_all(w)
     }
 
     fn remove<W: Write>(&mut self, w: &mut W, range: Range<usize>) -> Result<()> {
-        self.idx = range.start;
+        self.set_cursor(w, range.start)?;
         self.content.remove(range);
-        self.update_cursor(w)?;
         self.update_highlights();
         self.draw(w, self.content.line_to_char(self.row()))
-        //self.draw_all(w)
     }
 
     pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
@@ -486,37 +485,40 @@ impl Buffer {
                 }
                 _ => (),
             },
-            EditMode::Command => match key_event.code {
-                KeyCode::Char(c) => self.status.push(c),
-                KeyCode::Backspace => {
-                    self.status.pop();
-                    if self.status.is_empty() {
+            EditMode::Command => {
+                match key_event.code {
+                    KeyCode::Char(c) => self.status.push(c),
+                    KeyCode::Backspace => {
+                        self.status.pop();
+                        if self.status.is_empty() {
+                            self.set_mode(w, EditMode::Normal)?;
+                        }
+                    }
+                    KeyCode::Esc => self.set_mode(w, EditMode::Normal)?,
+                    KeyCode::Enter => {
                         self.set_mode(w, EditMode::Normal)?;
-                    }
-                }
-                KeyCode::Esc => self.set_mode(w, EditMode::Normal)?,
-                KeyCode::Enter => {
-                    self.set_mode(w, EditMode::Normal)?;
-                    match self.status.as_str() {
-                        ":w" => self.save()?,
-                        ":q" => {
-                            if !self.edited {
-                                self.quit(w)?
-                            } else {
-                                self.status = String::from("Error: No write since last change. To quit without saving, use ':q!'")
+                        match self.status.as_str() {
+                            ":w" => self.save()?,
+                            ":q" => {
+                                if !self.edited {
+                                    self.quit(w)?
+                                } else {
+                                    self.status = String::from("Error: No write since last change. To quit without saving, use ':q!'")
+                                }
                             }
+                            ":q!" => self.quit(w)?,
+                            ":wq" | ":x" => {
+                                self.save()?;
+                                self.quit(w)?;
+                            }
+                            "r" => self.draw_all(w)?,
+                            _ => self.status = format!("Error: invalid command ({})", self.status),
                         }
-                        ":q!" => self.quit(w)?,
-                        ":wq" | ":x" => {
-                            self.save()?;
-                            self.quit(w)?;
-                        }
-                        "r" => self.draw_all(w)?,
-                        _ => self.status = format!("Error: invalid command ({})", self.status),
                     }
+                    _ => (),
                 }
-                _ => (),
-            },
+                self.draw_status_bar(w)?;
+            }
         }
         w.flush()?;
         Ok(())
