@@ -1,6 +1,6 @@
 use crate::{buffer::Buffer, config::Config};
 use crossterm::{
-    cursor::{MoveTo, SavePosition},
+    cursor::SavePosition,
     event,
     event::{EnableMouseCapture, Event, KeyEvent},
     execute,
@@ -9,13 +9,14 @@ use crossterm::{
 };
 use std::{
     env,
-    io::{self, Write},
+    io::{self, Stdout},
     path::PathBuf,
 };
 
 mod buffer;
 mod command;
 mod config;
+mod utils;
 
 fn main() {
     let config_path = PathBuf::from(match env::var("XDG_CONFIG_HOME") {
@@ -34,7 +35,7 @@ fn main() {
         }
     };
 
-    run(&mut io::stdout(), config).unwrap();
+    run(io::stdout(), config).unwrap();
 }
 
 struct CleanUp;
@@ -45,29 +46,28 @@ impl Drop for CleanUp {
     }
 }
 
-fn run<W: Write>(w: &mut W, config: Config) -> Result<()> {
+fn run(mut w: Stdout, config: Config) -> Result<()> {
     let _cleanup = CleanUp;
     let path = env::args().nth(1).expect("No file argument given!").into();
-    let mut editor = Editor::new(path, config);
 
     terminal::enable_raw_mode()?;
     execute!(
         w,
         SavePosition,
-        MoveTo(editor.buffer().line_nr_cols as u16, 0),
         EnterAlternateScreen,
         EnableMouseCapture,
         DisableLineWrap,
     )?;
 
-    editor.draw(w)?;
+    let mut editor = Editor::new(w, path, config);
+    editor.draw()?;
     loop {
         match event::read()? {
             Event::Resize(width, height) => {
                 editor.update_size(width as usize, height as usize);
-                editor.draw(w)?;
+                editor.draw()?;
             }
-            Event::Key(event) => editor.handle_keyevent(w, event)?,
+            Event::Key(event) => editor.handle_keyevent(event)?,
             _ => (),
         }
     }
@@ -75,18 +75,18 @@ fn run<W: Write>(w: &mut W, config: Config) -> Result<()> {
 
 struct Editor {
     buffers: Vec<Buffer>,
-    config: Config,
+    _config: Config,
     current_buffer: usize,
     width: usize,
     height: usize,
 }
 
 impl Editor {
-    pub fn new(path: PathBuf, config: Config) -> Self {
+    pub fn new(w: Stdout, path: PathBuf, config: Config) -> Self {
         let (width, height) = terminal::size().unwrap();
         Editor {
-            buffers: vec![Buffer::new(path, config.clone())],
-            config,
+            buffers: vec![Buffer::new(w, path, config.clone())],
+            _config: config,
             current_buffer: 0,
             width: width as usize,
             height: height as usize,
@@ -99,14 +99,8 @@ impl Editor {
         self.height = height;
     }
 
-    pub fn draw<W: Write>(&mut self, w: &mut W) -> Result<()> {
-        self.buffer_mut().draw_all(w)
-    }
-
-    pub fn buffer(&self) -> &Buffer {
-        self.buffers
-            .get(self.current_buffer)
-            .expect("Buffer index was out of range for editor")
+    pub fn draw(&mut self) -> Result<()> {
+        self.buffer_mut().draw_all()
     }
 
     pub fn buffer_mut(&mut self) -> &mut Buffer {
@@ -115,7 +109,7 @@ impl Editor {
             .expect("Buffer index was out of range for editor")
     }
 
-    pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
-        self.buffer_mut().handle_keyevent(w, key_event)
+    pub fn handle_keyevent(&mut self, key_event: KeyEvent) -> Result<()> {
+        self.buffer_mut().handle_keyevent(key_event)
     }
 }
