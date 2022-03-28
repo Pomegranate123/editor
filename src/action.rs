@@ -1,4 +1,4 @@
-use crate::buffer::Buffer;
+use crate::buffer::Content;
 use crate::buffer::EditMode;
 use crate::utils::{Movement, Selection};
 use undo::Action;
@@ -21,14 +21,14 @@ impl Move {
 }
 
 impl Action for Move {
-    type Target = Buffer;
+    type Target = Content;
     type Output = ();
     type Error = crossterm::ErrorKind;
 
     fn apply(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
         self.origin = buf.idx;
         let dest = self.movement.dest(buf);
-        buf.set_cursor(dest)?;
+        buf.idx = dest;
         if let Movement::Left(_) | Movement::Right(_) | Movement::Home | Movement::End =
             self.movement
         {
@@ -39,7 +39,7 @@ impl Action for Move {
     }
 
     fn undo(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
-        buf.set_cursor(self.origin)?;
+        buf.idx = self.origin;
         if let Some(col) = self.saved_col {
             buf.saved_col = col
         };
@@ -66,20 +66,22 @@ impl Delete {
 }
 
 impl Action for Delete {
-    type Target = Buffer;
+    type Target = Content;
     type Output = ();
     type Error = crossterm::ErrorKind;
 
     fn apply(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
         let bounds = self.selection.bounds(&buf);
         self.left_bound = bounds.start;
-        self.removed = buf.content.slice(bounds.clone()).to_string();
-        buf.remove(bounds)
+        self.removed = buf.text.slice(bounds.clone()).to_string();
+        buf.remove(bounds);
+        Ok(())
     }
 
     fn undo(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
-        buf.insert(self.left_bound, &self.removed)?;
-        buf.set_cursor(self.origin)
+        buf.insert(self.left_bound, &self.removed);
+        buf.idx = self.origin;
+        Ok(())
     }
 }
 
@@ -99,18 +101,18 @@ impl Insert {
 }
 
 impl Action for Insert {
-    type Target = Buffer;
+    type Target = Content;
     type Output = ();
-    type Error = crossterm::ErrorKind;
+    type Error = ();
 
     fn apply(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
         self.origin = buf.idx;
-        buf.insert(buf.idx, &self.text)?;
+        buf.insert(buf.idx, &self.text);
         Ok(())
     }
 
     fn undo(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
-        buf.remove(self.origin..(self.origin + self.text.len()))?;
+        buf.remove(self.origin..(self.origin + self.text.len()));
         Ok(())
     }
 }
@@ -125,13 +127,13 @@ impl Yank {
 }
 
 impl Action for Yank {
-    type Target = Buffer;
+    type Target = Content;
     type Output = ();
-    type Error = crossterm::ErrorKind;
+    type Error = ();
 
     fn apply(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
         let bounds = self.selection.bounds(buf);
-        let text = buf.content.slice(bounds);
+        let text = buf.text.slice(bounds);
         cli_clipboard::set_contents(text.to_string()).expect("Error setting system clipboard");
         Ok(())
     }
@@ -153,9 +155,9 @@ impl SetMode {
 }
 
 impl Action for SetMode {
-    type Target = Buffer;
+    type Target = Content;
     type Output = ();
-    type Error = crossterm::ErrorKind;
+    type Error = ();
 
     fn apply(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
         self.prev_mode = buf.mode;
@@ -180,9 +182,9 @@ impl Action for SetMode {
 // }
 //
 // impl Action for Command {
-//     type Target = Buffer;
+//     type Target = Content;
 //     type Output = ();
-//     type Error = crossterm::ErrorKind;
+//     type Error = ();
 //
 //     fn apply(&mut self, buf: &mut Self::Target) -> Result<Self::Output, Self::Error> {
 //         Ok(())

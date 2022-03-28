@@ -1,5 +1,22 @@
-use crate::buffer::Buffer;
+use crate::buffer::Content;
 use std::ops::Range;
+
+pub struct Pos {
+    pub x: usize,
+    pub y: usize,
+}
+
+impl Pos {
+    pub fn new(x: usize, y: usize) -> Self {
+        Self { x, y }
+    }
+}
+
+impl Default for Pos {
+    fn default() -> Self {
+        Self { x: 0, y: 0 }
+    }
+}
 
 #[derive(Clone, Copy)]
 pub enum Movement {
@@ -35,44 +52,36 @@ pub enum Selection {
 }
 
 impl Movement {
-    pub fn dest(&self, buf: &Buffer) -> usize {
+    pub fn dest(&self, buf: &Content) -> usize {
         match &self {
             Movement::Up(amount) => {
                 let y = buf.row().saturating_sub(*amount);
                 let x = usize::min(buf.max_col(y), buf.saved_col);
-                buf.content.line_to_char(y) + x
+                buf.text.line_to_char(y) + x
             }
             Movement::Down(amount) => {
                 let y = usize::min(
                     buf.row() + amount,
-                    buf.content.len_lines().saturating_sub(1),
+                    buf.text.len_lines().saturating_sub(1),
                 );
                 let x = usize::min(buf.max_col(y), buf.saved_col);
-                buf.content.line_to_char(y) + x
+                buf.text.line_to_char(y) + x
             }
             Movement::Left(amount) => usize::max(
                 buf.idx.saturating_sub(*amount),
-                buf.content.line_to_char(buf.row()),
+                buf.text.line_to_char(buf.row()),
             ),
             Movement::Right(amount) => usize::min(
                 buf.idx + amount,
-                buf.content.line_to_char(buf.row()) + buf.max_col(buf.row()),
+                buf.text.line_to_char(buf.row()) + buf.max_col(buf.row()),
             ),
-            Movement::Home => buf.content.line_to_char(buf.row()),
-            Movement::End => buf.content.line_to_char(buf.row()) + buf.max_col(buf.row()),
+            Movement::Home => buf.text.line_to_char(buf.row()),
+            Movement::End => buf.text.line_to_char(buf.row()) + buf.max_col(buf.row()),
             Movement::FirstChar => {
                 unimplemented!()
             }
-            Movement::Top => {
-                let y = buf.offset_x + 3;
-                let x = usize::min(buf.max_col(y), buf.saved_col);
-                buf.content.line_to_char(y) + x
-            }
-            Movement::Bottom => {
-                let y = buf.offset_x + buf.height - 3;
-                let x = usize::min(buf.max_col(y), buf.saved_col);
-                buf.content.line_to_char(y) + x
-            }
+            Movement::Top => { 0 }
+            Movement::Bottom => { buf.text.len_chars() }
             Movement::NextWord(_amount) => {
                 unimplemented!()
             }
@@ -84,12 +93,12 @@ impl Movement {
 }
 
 impl Selection {
-    pub fn bounds(&self, buf: &Buffer) -> Range<usize> {
+    pub fn bounds(&self, buf: &Content) -> Range<usize> {
         match self {
             Selection::Lines(amount) => {
-                let start = buf.content.line_to_char(buf.row());
-                let dest = usize::min(buf.row() + amount, buf.content.len_lines());
-                let end = buf.content.line_to_char(dest);
+                let start = buf.text.line_to_char(buf.row());
+                let dest = usize::min(buf.row() + amount, buf.text.len_lines());
+                let end = buf.text.line_to_char(dest);
                 start..end
             }
             Selection::UpTo(mov) => buf.idx..mov.dest(&buf),

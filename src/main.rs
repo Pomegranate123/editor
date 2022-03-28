@@ -1,20 +1,22 @@
 use crate::{buffer::Buffer, config::Config};
 use crossterm::{
-    cursor::SavePosition,
+    cursor::{RestorePosition, SavePosition},
     event,
-    event::{EnableMouseCapture, Event, KeyEvent},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEvent},
     execute,
-    terminal::{self, DisableLineWrap, EnterAlternateScreen},
+    terminal::{self, EnableLineWrap, DisableLineWrap, LeaveAlternateScreen, EnterAlternateScreen},
     Result,
 };
 use std::{
+    process,
     env,
-    io::{self, Stdout},
+    io::{self, Write},
     path::PathBuf,
 };
 
 mod buffer;
-mod command;
+mod view;
+mod action;
 mod config;
 mod utils;
 
@@ -35,7 +37,7 @@ fn main() {
         }
     };
 
-    run(io::stdout(), config).unwrap();
+    run(&mut io::stdout(), config).unwrap();
 }
 
 struct CleanUp;
@@ -46,28 +48,20 @@ impl Drop for CleanUp {
     }
 }
 
-fn run(mut w: Stdout, config: Config) -> Result<()> {
+fn run<W: Write>(w: &mut W, config: Config) -> Result<()> {
     let _cleanup = CleanUp;
     let path = env::args().nth(1).expect("No file argument given!").into();
 
-    terminal::enable_raw_mode()?;
-    execute!(
-        w,
-        SavePosition,
-        EnterAlternateScreen,
-        EnableMouseCapture,
-        DisableLineWrap,
-    )?;
 
-    let mut editor = Editor::new(w, path, config);
-    editor.draw()?;
+    let mut editor = Editor::new(path, config);
+    editor.draw(w)?;
     loop {
         match event::read()? {
             Event::Resize(width, height) => {
                 editor.update_size(width as usize, height as usize);
-                editor.draw()?;
+                editor.draw(w)?;
             }
-            Event::Key(event) => editor.handle_keyevent(event)?,
+            Event::Key(event) => editor.handle_keyevent(w, event)?,
             _ => (),
         }
     }
@@ -82,15 +76,26 @@ struct Editor {
 }
 
 impl Editor {
-    pub fn new(w: Stdout, path: PathBuf, config: Config) -> Self {
+    pub fn new(path: PathBuf, config: Config) -> Self {
         let (width, height) = terminal::size().unwrap();
         Editor {
-            buffers: vec![Buffer::new(w, path, config.clone())],
+            buffers: vec![Buffer::new(path, config.clone())],
             _config: config,
             current_buffer: 0,
             width: width as usize,
             height: height as usize,
         }
+    }
+
+    pub fn start<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        terminal::enable_raw_mode()?;
+        execute!(
+            w,
+            SavePosition,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            DisableLineWrap,
+        )
     }
 
     pub fn update_size(&mut self, width: usize, height: usize) {
@@ -99,8 +104,8 @@ impl Editor {
         self.height = height;
     }
 
-    pub fn draw(&mut self) -> Result<()> {
-        self.buffer_mut().draw_all()
+    pub fn draw<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        self.buffer_mut().draw_all(w)
     }
 
     pub fn buffer_mut(&mut self) -> &mut Buffer {
@@ -109,7 +114,20 @@ impl Editor {
             .expect("Buffer index was out of range for editor")
     }
 
-    pub fn handle_keyevent(&mut self, key_event: KeyEvent) -> Result<()> {
-        self.buffer_mut().handle_keyevent(key_event)
+    pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
+        self.buffer_mut().handle_keyevent(w, key_event)
+    }
+
+    /// Cleans up and quits the application
+    fn quit<W: Write>(&mut self, w: &mut W) -> Result<()> {
+        execute!(
+            w,
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            RestorePosition,
+            EnableLineWrap,
+        )?;
+        terminal::disable_raw_mode()?;
+        process::exit(0);
     }
 }

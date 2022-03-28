@@ -47,7 +47,6 @@ impl From<SerDeConfig> for Config {
 }
 
 pub fn get_hl_conf(path: &Path) -> Option<HighlightConfiguration> {
-    eprintln!("{}", path.extension().unwrap().to_str().unwrap());
     let hl_conf = match path.extension() {
         None => return None,
         Some(extension) => match extension.to_str().unwrap() {
