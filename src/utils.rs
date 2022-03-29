@@ -1,20 +1,70 @@
-use crate::buffer::Content;
+use crate::buffer::Buffer;
+use derive_more::{Add, Deref, From, Sub};
 use std::ops::Range;
 
-pub struct Pos {
-    pub x: usize,
-    pub y: usize,
+#[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
+pub struct BufCharIdx(pub usize);
+
+#[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
+pub struct BufByteIdx(pub usize);
+
+#[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
+pub struct BufCol(pub usize);
+
+impl BufCol {
+    pub fn as_termcol(self) -> TermCol {
+        TermCol(self.0 as u16)
+    }
 }
 
-impl Pos {
-    pub fn new(x: usize, y: usize) -> Self {
+#[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
+pub struct BufRow(pub usize);
+
+impl BufRow {
+    pub fn as_termrow(self) -> TermRow {
+        TermRow(self.0 as u16)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct BufPos {
+    pub x: BufCol,
+    pub y: BufRow,
+}
+
+impl BufPos {
+    pub fn new(x: BufCol, y: BufRow) -> Self {
         Self { x, y }
     }
 }
 
-impl Default for Pos {
-    fn default() -> Self {
-        Self { x: 0, y: 0 }
+#[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
+pub struct TermCol(pub u16);
+
+impl TermCol {
+    pub fn as_bufcol(self) -> BufCol {
+        BufCol(self.0 as usize)
+    }
+}
+
+#[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
+pub struct TermRow(pub u16);
+
+impl TermRow {
+    pub fn as_bufrow(self) -> BufRow {
+        BufRow(self.0 as usize)
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub struct TermPos {
+    pub x: TermCol,
+    pub y: TermRow,
+}
+
+impl TermPos {
+    pub fn new(x: TermCol, y: TermRow) -> Self {
+        Self { x, y }
     }
 }
 
@@ -31,6 +81,47 @@ pub enum Movement {
     FirstChar,
     NextWord(usize),
     PrevWord(usize),
+}
+
+impl Movement {
+    pub fn dest(&self, buf: &Buffer) -> BufCharIdx {
+        match &self {
+            Movement::Up(amount) => {
+                let y = buf.row().saturating_sub(*amount).into();
+                let x = usize::min(*buf.max_col(y), *buf.saved_col).into();
+                buf.line_to_char(y) + x
+            }
+            Movement::Down(amount) => {
+                let y =
+                    usize::min(*buf.row() + amount, buf.text.len_lines().saturating_sub(1)).into();
+                let x = usize::min(*buf.max_col(y), *buf.saved_col).into();
+                buf.line_to_char(y) + x
+            }
+            Movement::Left(amount) => usize::max(
+                buf.idx.saturating_sub(*amount),
+                *buf.line_to_char(buf.row()),
+            )
+            .into(),
+            Movement::Right(amount) => usize::min(
+                *buf.idx + amount,
+                *buf.line_to_char(buf.row()) + *buf.max_col(buf.row()),
+            )
+            .into(),
+            Movement::Home => buf.line_to_char(buf.row()),
+            Movement::End => buf.line_to_char(buf.row() + BufRow(1)) - BufCharIdx(1),
+            Movement::FirstChar => {
+                unimplemented!()
+            }
+            Movement::Top => BufCharIdx(0),
+            Movement::Bottom => buf.text.len_chars().into(),
+            Movement::NextWord(_amount) => {
+                unimplemented!()
+            }
+            Movement::PrevWord(_amount) => {
+                unimplemented!()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -51,65 +142,30 @@ pub enum Selection {
     },
 }
 
-impl Movement {
-    pub fn dest(&self, buf: &Content) -> usize {
-        match &self {
-            Movement::Up(amount) => {
-                let y = buf.row().saturating_sub(*amount);
-                let x = usize::min(buf.max_col(y), buf.saved_col);
-                buf.text.line_to_char(y) + x
-            }
-            Movement::Down(amount) => {
-                let y = usize::min(
-                    buf.row() + amount,
-                    buf.text.len_lines().saturating_sub(1),
-                );
-                let x = usize::min(buf.max_col(y), buf.saved_col);
-                buf.text.line_to_char(y) + x
-            }
-            Movement::Left(amount) => usize::max(
-                buf.idx.saturating_sub(*amount),
-                buf.text.line_to_char(buf.row()),
-            ),
-            Movement::Right(amount) => usize::min(
-                buf.idx + amount,
-                buf.text.line_to_char(buf.row()) + buf.max_col(buf.row()),
-            ),
-            Movement::Home => buf.text.line_to_char(buf.row()),
-            Movement::End => buf.text.line_to_char(buf.row()) + buf.max_col(buf.row()),
-            Movement::FirstChar => {
-                unimplemented!()
-            }
-            Movement::Top => { 0 }
-            Movement::Bottom => { buf.text.len_chars() }
-            Movement::NextWord(_amount) => {
-                unimplemented!()
-            }
-            Movement::PrevWord(_amount) => {
-                unimplemented!()
-            }
-        }
-    }
-}
-
 impl Selection {
-    pub fn bounds(&self, buf: &Content) -> Range<usize> {
+    pub fn bounds(&self, buf: &Buffer) -> Range<BufCharIdx> {
         match self {
             Selection::Lines(amount) => {
-                let start = buf.text.line_to_char(buf.row());
-                let dest = usize::min(buf.row() + amount, buf.text.len_lines());
-                let end = buf.text.line_to_char(dest);
+                let start = buf.line_to_char(buf.row());
+                let dest = usize::min(*buf.row() + amount, buf.text.len_lines()).into();
+                let end = buf.line_to_char(dest);
                 start..end
             }
-            Selection::UpTo(mov) => buf.idx..mov.dest(&buf),
+            Selection::UpTo(mov) => buf.idx..mov.dest(buf),
             Selection::Between {
                 // TODO: implement
                 first: _,
                 last: _,
                 inclusive: _,
-            } => 0..0,
-            Selection::Word { inclusive: _ } => 0..0, // TODO: implement
-            Selection::Paragraph { inclusive: _ } => 0..0, // TODO: implement
+            } => BufCharIdx(0)..BufCharIdx(0),
+            Selection::Word { inclusive: _ } => BufCharIdx(0)..BufCharIdx(0), // TODO: implement
+            Selection::Paragraph { inclusive: _ } => BufCharIdx(0)..BufCharIdx(0), // TODO: implement
         }
+    }
+}
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self::Lines(0)
     }
 }

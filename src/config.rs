@@ -209,7 +209,7 @@ impl From<Color> for style::Color {
 
 impl Default for SerDeConfig {
     fn default() -> Self {
-        let hl_types: Vec<String> = vec![
+        let hl_types = vec![
             "attribute",
             "constant",
             "function.builtin",
@@ -225,8 +225,7 @@ impl Default for SerDeConfig {
             "variable.builtin",
         ]
         .into_iter()
-        .map(String::from)
-        .collect();
+        .map(String::from);
         let hl_styles = vec![
             Style::new().fg(Color::Blue),
             Style::new().fg(Color::DarkYellow),
@@ -254,7 +253,7 @@ impl Default for SerDeConfig {
                     b: 80,
                 })
                 .bg(Color::Black),
-            hl: hl_types.into_iter().zip(hl_styles.into_iter()).collect(),
+            hl: hl_types.zip(hl_styles.into_iter()).collect(),
         }
     }
 }

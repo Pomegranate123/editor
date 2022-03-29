@@ -1,23 +1,24 @@
-use crate::{buffer::Buffer, config::Config};
+use crate::{render::BufferRenderer, config::Config};
 use crossterm::{
     cursor::{RestorePosition, SavePosition},
     event,
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEvent},
     execute,
-    terminal::{self, EnableLineWrap, DisableLineWrap, LeaveAlternateScreen, EnterAlternateScreen},
+    terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     Result,
 };
 use std::{
-    process,
     env,
     io::{self, Write},
     path::PathBuf,
+    process,
 };
 
-mod buffer;
-mod view;
 mod action;
+mod buffer;
 mod config;
+mod rect;
+mod render;
 mod utils;
 
 fn main() {
@@ -52,13 +53,13 @@ fn run<W: Write>(w: &mut W, config: Config) -> Result<()> {
     let _cleanup = CleanUp;
     let path = env::args().nth(1).expect("No file argument given!").into();
 
-
     let mut editor = Editor::new(path, config);
+    editor.start(w)?;
     editor.draw(w)?;
     loop {
         match event::read()? {
             Event::Resize(width, height) => {
-                editor.update_size(width as usize, height as usize);
+                editor.update_size(width, height);
                 editor.draw(w)?;
             }
             Event::Key(event) => editor.handle_keyevent(w, event)?,
@@ -68,22 +69,22 @@ fn run<W: Write>(w: &mut W, config: Config) -> Result<()> {
 }
 
 struct Editor {
-    buffers: Vec<Buffer>,
+    buffers: Vec<BufferRenderer>,
     _config: Config,
     current_buffer: usize,
-    width: usize,
-    height: usize,
+    width: u16,
+    height: u16,
 }
 
 impl Editor {
     pub fn new(path: PathBuf, config: Config) -> Self {
         let (width, height) = terminal::size().unwrap();
         Editor {
-            buffers: vec![Buffer::new(path, config.clone())],
+            buffers: vec![BufferRenderer::new(path, config.clone())],
             _config: config,
             current_buffer: 0,
-            width: width as usize,
-            height: height as usize,
+            width,
+            height,
         }
     }
 
@@ -98,7 +99,7 @@ impl Editor {
         )
     }
 
-    pub fn update_size(&mut self, width: usize, height: usize) {
+    pub fn update_size(&mut self, width: u16, height: u16) {
         self.buffer_mut().update_size(width, height);
         self.width = width;
         self.height = height;
@@ -108,16 +109,17 @@ impl Editor {
         self.buffer_mut().draw_all(w)
     }
 
-    pub fn buffer_mut(&mut self) -> &mut Buffer {
+    pub fn buffer_mut(&mut self) -> &mut BufferRenderer {
         self.buffers
             .get_mut(self.current_buffer)
-            .expect("Buffer index was out of range for editor")
+            .expect("BufferRenderer index was out of range for editor")
     }
 
     pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
         self.buffer_mut().handle_keyevent(w, key_event)
     }
 
+    #[allow(unused)]
     /// Cleans up and quits the application
     fn quit<W: Write>(&mut self, w: &mut W) -> Result<()> {
         execute!(
