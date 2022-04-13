@@ -32,20 +32,18 @@ pub struct BufferRenderer {
     pub buf: Buffer,
     /// The space the buffer gets to render
     pub rect: Rect,
-    /// The path of the file being edited
-    path: PathBuf,
-    /// Configuration for this buffer
-    config: Config,
-    /// The current command buffer
-    command: String,
-    /// The contents of the bottom statusline
-    status: String,
-    /// Whether the buffer has been edited since saving
-    edited: bool,
     /// The amount of columns reserved for line numbers
     line_nrs_width: TermCol,
     /// The amount of lines reserved for the status bar
     status_bar_height: TermRow,
+    /// The path of the file being edited
+    path: PathBuf,
+    /// Configuration for this buffer
+    config: Config,
+    /// The contents of the bottom statusline
+    status: String,
+    /// Whether the buffer has been edited since saving
+    edited: bool,
     /// The size of tab characters
     tab_size: u16,
     hl_conf: Option<HighlightConfiguration>,
@@ -80,7 +78,6 @@ impl BufferRenderer {
             status_bar_height,
             tab_size: 4,
             hl_conf,
-            command: String::new(),
             status: String::new(),
             edited: false,
             hl: Highlighter::new(),

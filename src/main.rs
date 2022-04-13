@@ -17,6 +17,7 @@ use std::{
 mod action;
 mod buffer;
 mod config;
+mod input;
 mod rect;
 mod render;
 mod utils;
