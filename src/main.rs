@@ -1,8 +1,8 @@
-use crate::{render::BufferRenderer, config::Config};
+use crate::{config::Config, render::BufferRenderer};
 use crossterm::{
     cursor::{RestorePosition, SavePosition},
     event,
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyEvent},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     Result,
@@ -39,7 +39,11 @@ fn main() {
         }
     };
 
-    run(&mut io::stdout(), config).unwrap();
+    let _cleanup = CleanUp;
+    let path = env::args().nth(1).expect("No file argument given!").into();
+
+    let mut editor = Editor::new(path, config);
+    editor.run(&mut io::stdout()).unwrap();
 }
 
 struct CleanUp;
@@ -47,25 +51,6 @@ struct CleanUp;
 impl Drop for CleanUp {
     fn drop(&mut self) {
         terminal::disable_raw_mode().expect("Unable to disable raw mode");
-    }
-}
-
-fn run<W: Write>(w: &mut W, config: Config) -> Result<()> {
-    let _cleanup = CleanUp;
-    let path = env::args().nth(1).expect("No file argument given!").into();
-
-    let mut editor = Editor::new(path, config);
-    editor.start(w)?;
-    editor.draw(w)?;
-    loop {
-        match event::read()? {
-            Event::Resize(width, height) => {
-                editor.update_size(width, height);
-                editor.draw(w)?;
-            }
-            Event::Key(event) => editor.handle_keyevent(w, event)?,
-            _ => (),
-        }
     }
 }
 
@@ -89,7 +74,7 @@ impl Editor {
         }
     }
 
-    pub fn start<W: Write>(&mut self, w: &mut W) -> Result<()> {
+    pub fn run<W: Write>(&mut self, w: &mut W) -> Result<()> {
         terminal::enable_raw_mode()?;
         execute!(
             w,
@@ -97,7 +82,17 @@ impl Editor {
             EnterAlternateScreen,
             EnableMouseCapture,
             DisableLineWrap,
-        )
+        )?;
+        self.buffer_mut().draw_all(w)?;
+        loop {
+            let input = event::read()?;
+            if let Event::Key(event) = input {
+                if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
+                    self.quit(w)?;
+                }
+            }
+            self.handle_input(w, input)?;
+        }
     }
 
     pub fn update_size(&mut self, width: u16, height: u16) {
@@ -106,18 +101,22 @@ impl Editor {
         self.height = height;
     }
 
-    pub fn draw<W: Write>(&mut self, w: &mut W) -> Result<()> {
-        self.buffer_mut().draw_all(w)
-    }
-
     pub fn buffer_mut(&mut self) -> &mut BufferRenderer {
         self.buffers
             .get_mut(self.current_buffer)
             .expect("BufferRenderer index was out of range for editor")
     }
 
-    pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
-        self.buffer_mut().handle_keyevent(w, key_event)
+    pub fn handle_input<W: Write>(&mut self, w: &mut W, event: Event) -> Result<()> {
+        match event {
+            Event::Resize(width, height) => {
+                self.update_size(width, height);
+                self.buffer_mut().draw_all(w)?;
+            }
+            Event::Key(event) => self.buffer_mut().handle_keyevent(w, event)?,
+            Event::Mouse(_event) => (),
+        }
+        Ok(())
     }
 
     #[allow(unused)]

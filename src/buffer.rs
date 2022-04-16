@@ -1,6 +1,14 @@
-use crate::utils::{BufByteIdx, BufCharIdx, BufCol, BufPos, BufRow};
+use crate::{
+    action::Action,
+    utils::{BufByteIdx, BufCharIdx, BufCol, BufPos, BufRow, BufRange},
+};
 use ropey::{Rope, RopeSlice};
-use std::{fs::File, io::BufReader, ops::Range, path::Path};
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter},
+    ops::Range,
+    path::PathBuf,
+};
 
 #[derive(Clone, Copy)]
 pub enum EditMode {
@@ -17,17 +25,29 @@ impl Default for EditMode {
 
 #[derive(Default)]
 pub struct Buffer {
+    /// Rope represtation of the contents of this buffer
     pub text: Rope,
+    /// Current index of the cursor within the rope
     pub idx: BufCharIdx,
+    /// The column index the cursor will snap to when moving between lines
     pub saved_col: BufCol,
+    /// The mode the buffer is currently in
     pub mode: EditMode,
+    /// Whether the buffer has been edited since saving
+    pub edited: bool,
+    /// The path of the file being edited
+    pub path: PathBuf,
+    pub undo: Vec<Action>,
+    pub redo: Vec<Action>,
 }
 
 impl Buffer {
-    pub fn new(path: &Path) -> Self {
-        let text = Rope::from_reader(BufReader::new(File::open(path).unwrap())).unwrap();
+    pub fn new(path: PathBuf) -> Self {
+        let text = Rope::from_reader(BufReader::new(File::open(&path).unwrap())).unwrap();
         Self {
             text,
+            edited: false,
+            path,
             ..Default::default()
         }
     }
@@ -51,9 +71,9 @@ impl Buffer {
         self.text.insert(*i, string);
     }
 
-    pub fn remove(&mut self, range: Range<BufCharIdx>) {
+    pub fn remove(&mut self, range: BufRange) {
         self.idx = range.start;
-        let range: Range<usize> = *range.start..*range.end;
+        let range: Range<usize> = range.into();
         self.text.remove(range);
     }
 
@@ -77,8 +97,29 @@ impl Buffer {
         self.text.line_to_byte(*line).into()
     }
 
-    pub fn slice(&self, range: Range<BufCharIdx>) -> RopeSlice<'_> {
-        let range = *range.start..*range.end;
+    pub fn slice(&self, range: BufRange) -> RopeSlice<'_> {
+        let range: Range<usize> = range.into();
         self.text.slice(range)
+    }
+
+    pub fn save_col(&mut self) {
+        self.saved_col = self.col();
+    }
+
+    /// Saves the current state of the buffer to the file
+    pub fn write(&mut self) {
+        self.text
+            .write_to(BufWriter::new(
+                File::create(&self.path)
+                    .expect("Unable to create new/read existing file at buffer path"),
+            ))
+            .unwrap();
+        self.edited = false;
+    }
+
+    pub fn apply(&mut self, action: Action) -> Result<(), &'static str> {
+        self.redo.clear();
+        self.undo.push(action.inverse(self));
+        action.apply(self)
     }
 }

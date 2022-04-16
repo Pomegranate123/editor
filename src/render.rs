@@ -1,9 +1,10 @@
 use crate::{
-    action::Move,
+    action::Action,
     buffer::{Buffer, EditMode},
     config::{self, Config},
-    utils::{BufCharIdx, BufRow, Movement, TermCol, TermRow},
+    input::InputHandler,
     rect::Rect,
+    utils::{BufRow, TermCol, TermRow, BufRange},
 };
 use crossterm::{
     cursor::{
@@ -16,17 +17,10 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnableLineWrap, LeaveAlternateScreen},
     Result,
 };
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-    ops::Range,
-    path::PathBuf,
-    process,
-};
+use std::{io::Write, path::PathBuf, process};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
-use undo::Action;
 
-/// Renders the a buffer in a view
+/// Renders a buffer in a Rect
 pub struct BufferRenderer {
     /// The text contained by the buffer
     pub buf: Buffer,
@@ -36,14 +30,10 @@ pub struct BufferRenderer {
     line_nrs_width: TermCol,
     /// The amount of lines reserved for the status bar
     status_bar_height: TermRow,
-    /// The path of the file being edited
-    path: PathBuf,
-    /// Configuration for this buffer
+    /// Configuration for this renderer
     config: Config,
     /// The contents of the bottom statusline
     status: String,
-    /// Whether the buffer has been edited since saving
-    edited: bool,
     /// The size of tab characters
     tab_size: u16,
     hl_conf: Option<HighlightConfiguration>,
@@ -53,16 +43,14 @@ pub struct BufferRenderer {
 
 impl BufferRenderer {
     pub fn new(path: PathBuf, config: Config) -> Self {
-        let buf = Buffer::new(&path);
-
-        let (width, height) = terminal::size().unwrap();
-        let line_nrs_width = TermCol(buf.text.len_lines().to_string().len() as u16 + 1);
-        let status_bar_height = TermRow(2);
-
         let hl_conf = config::get_hl_conf(&path).map(|mut conf| {
             conf.configure(&config.hl_types);
             conf
         });
+        let buf = Buffer::new(path);
+        let (width, height) = terminal::size().unwrap();
+        let line_nrs_width = TermCol(buf.text.len_lines().to_string().len() as u16 + 1);
+        let status_bar_height = TermRow(2);
 
         BufferRenderer {
             buf,
@@ -72,14 +60,12 @@ impl BufferRenderer {
                 line_nrs_width,
                 0.into(),
             ),
-            path,
             config,
             line_nrs_width,
             status_bar_height,
             tab_size: 4,
             hl_conf,
             status: String::new(),
-            edited: false,
             hl: Highlighter::new(),
             hl_cache: None,
         }
@@ -106,37 +92,26 @@ impl BufferRenderer {
     }
 
     pub fn update_size(&mut self, width: u16, height: u16) {
-        self.rect
-            .resize(TermCol(width) - self.line_nrs_width, TermRow(height) - self.status_bar_height);
-    }
-
-    pub fn set_mode<W: Write>(&mut self, w: &mut W, mode: EditMode) -> Result<()> {
-        match mode {
-            EditMode::Insert => queue!(w, SetCursorShape(CursorShape::Line))?,
-            EditMode::Normal => queue!(w, SetCursorShape(CursorShape::Block))?,
-            EditMode::Command => self.status = String::from(":"),
-        }
-        self.buf.mode = mode;
-        Ok(())
+        self.rect.resize(
+            TermCol(width) - self.line_nrs_width,
+            TermRow(height) - self.status_bar_height,
+        );
     }
 
     /// Saves the current state of the buffer to the file
     fn save(&mut self) -> Result<()> {
-        self.buf
-            .text
-            .write_to(BufWriter::new(File::create(&self.path)?))?;
+        self.buf.write();
         self.status = format!(
             "\"{}\" {}L, {}C written",
-            self.path.to_str().unwrap(),
+            self.buf.path.to_str().unwrap(),
             self.buf.text.len_lines(),
             self.buf.text.len_chars(),
         );
-        self.edited = false;
         Ok(())
     }
 
     /// Cleans up and quits the application
-    fn quit<W: Write>(&mut self, w: &mut W) -> Result<()> {
+    fn close<W: Write>(&mut self, w: &mut W) -> Result<()> {
         execute!(
             w,
             DisableMouseCapture,
@@ -185,7 +160,7 @@ impl BufferRenderer {
     }
 
     fn draw_status_bar<W: Write>(&mut self, w: &mut W) -> Result<()> {
-        let path = self.path.to_str().unwrap();
+        let path = self.buf.path.to_str().unwrap();
         let (row, col) = (self.buf.row(), self.buf.col());
         let status = &self.status;
         queue!(
@@ -222,47 +197,49 @@ impl BufferRenderer {
             w,
             SavePosition,
             Hide,
-            MoveTo(*self.cursor_x(), *self.rect.terminal_y(first_line)),
+            MoveTo(*self.rect.terminal_x(0.into()), *self.rect.terminal_y(first_line)),
             Clear(ClearType::UntilNewLine)
         )?;
 
-        if self.hl_conf.is_none() {
-            let rendered_chars =
-                self.buf.line_to_char(first_line)..self.buf.line_to_char(last_line);
-            self.draw_char_range(w, rendered_chars)?;
-            return Ok(());
-        }
+        match &self.hl_conf {
+            None => {
+                let rendered_chars =
+                    BufRange::new(self.buf.line_to_char(first_line), self.buf.line_to_char(last_line));
+                self.draw_char_range(w, rendered_chars)?;
+            }
+            Some(_) => {
+                if self.hl_cache.is_none() {
+                    self.update_highlights();
+                }
+                let rendered_bytes = self.buf.line_to_byte(first_line)..self.buf.line_to_byte(last_line);
 
-        if self.hl_cache.is_none() {
-            self.update_highlights();
-        }
-        let rendered_bytes = self.buf.line_to_byte(first_line)..self.buf.line_to_byte(last_line);
-
-        for event in self.hl_cache.as_ref().unwrap() {
-            match event {
-                HighlightEvent::Source { start, end } => {
-                    if *start > *rendered_bytes.end || *end <= *rendered_bytes.start {
-                        continue;
+                for event in self.hl_cache.as_ref().unwrap() {
+                    match event {
+                        HighlightEvent::Source { start, end } => {
+                            if *start > *rendered_bytes.end || *end <= *rendered_bytes.start {
+                                continue;
+                            }
+                            let first = self
+                                .buf
+                                .byte_to_char(usize::max(*start, *rendered_bytes.start).into());
+                            let last = self
+                                .buf
+                                .byte_to_char(usize::min(*end, *rendered_bytes.end).into());
+                            self.draw_char_range(w, BufRange::new(first, last))?;
+                        }
+                        HighlightEvent::HighlightStart(s) => {
+                            let style = self.config.hl_styles[s.0];
+                            if let Some(fg) = style.foreground_color {
+                                queue!(w, SetForegroundColor(fg))?
+                            };
+                            if let Some(bg) = style.background_color {
+                                queue!(w, SetBackgroundColor(bg))?
+                            };
+                            queue!(w, SetAttributes(style.attributes))?;
+                        }
+                        HighlightEvent::HighlightEnd => queue!(w, ResetColor)?,
                     }
-                    let first = self
-                        .buf
-                        .byte_to_char(usize::max(*start, *rendered_bytes.start).into());
-                    let last = self
-                        .buf
-                        .byte_to_char(usize::min(*end, *rendered_bytes.end).into());
-                    self.draw_char_range(w, first..last)?;
                 }
-                HighlightEvent::HighlightStart(s) => {
-                    let style = self.config.hl_styles[s.0];
-                    if let Some(fg) = style.foreground_color {
-                        queue!(w, SetForegroundColor(fg))?
-                    };
-                    if let Some(bg) = style.background_color {
-                        queue!(w, SetBackgroundColor(bg))?
-                    };
-                    queue!(w, SetAttributes(style.attributes))?;
-                }
-                HighlightEvent::HighlightEnd => queue!(w, ResetColor)?,
             }
         }
 
@@ -270,7 +247,7 @@ impl BufferRenderer {
         Ok(())
     }
 
-    fn draw_char_range<W: Write>(&self, w: &mut W, range: Range<BufCharIdx>) -> Result<()> {
+    fn draw_char_range<W: Write>(&self, w: &mut W, range: BufRange) -> Result<()> {
         let mut lines = self.buf.slice(range).lines();
         if let Some(line) = lines.next() {
             queue!(w, Print(line))?;
@@ -288,122 +265,66 @@ impl BufferRenderer {
 
     fn update_cursor<W: Write>(&mut self, w: &mut W) -> Result<()> {
         match self.buf.mode {
+            EditMode::Normal => queue!(w, SetCursorShape(CursorShape::Block))?,
+            EditMode::Insert => queue!(w, SetCursorShape(CursorShape::Line))?,
             EditMode::Command => {
-                queue!(w, MoveTo(self.status.len() as u16, *self.rect.height + 1))
-            }
-            _ => {
-                let cursor = self.buf.cursor();
-                self.rect.scroll_to_cursor(cursor);
-                let pos = self.rect.terminal_pos(cursor);
-                queue!(w, MoveTo(*pos.x, *pos.y))?;
-                self.draw_line_nrs(w)
+                queue!(w, MoveTo(self.status.len() as u16, *self.rect.height + 1))?;
+                return Ok(())
             }
         }
-    }
-
-    pub fn insert<W: Write>(&mut self, w: &mut W, i: BufCharIdx, text: &str) -> Result<()> {
-        self.buf.insert(i, text);
-        self.update_cursor(w)?;
-        self.update_highlights();
-        self.draw(w, self.buf.row())
-    }
-
-    pub fn remove<W: Write>(&mut self, w: &mut W, range: Range<BufCharIdx>) -> Result<()> {
-        self.buf.remove(range);
-        self.update_cursor(w)?;
-        self.update_highlights();
-        self.draw(w, self.buf.row())
-    }
-
-    fn move_cursor(&mut self, movement: Movement) -> Result<()> {
-        Move::new(movement).apply(&mut self.buf).unwrap();
-        Ok(())
+        let cursor = self.buf.cursor();
+        self.rect.scroll_to_cursor(cursor);
+        let pos = self.rect.terminal_pos(cursor);
+        queue!(w, MoveTo(*pos.x, *pos.y))?;
+        self.draw_line_nrs(w)
     }
 
     pub fn handle_keyevent<W: Write>(&mut self, w: &mut W, key_event: KeyEvent) -> Result<()> {
         match self.buf.mode {
             EditMode::Normal => {
-                match key_event.code {
-                    KeyCode::Char('q') => self.quit(w)?,
-                    _ => (),
-                //     KeyCode::Esc => self.command.clear(),
-                //     KeyCode::Char(c) => self.command.push(c),
-                //     KeyCode::Up => self.command.push('k'),
-                //     KeyCode::Down => self.command.push('j'),
-                //     KeyCode::Left => self.command.push('h'),
-                //     KeyCode::Right => self.command.push('l'),
-                //     KeyCode::Home => self.command.push('0'),
-                //     KeyCode::End => self.command.push('$'),
-                //     KeyCode::Delete => self.command.push('x'),
-                //     _ => (),
-                // }
-                // self.status = self.command.clone();
-                // if let Some(commands) = Command::parse(&self.status) {
-                //     self.command.clear();
-                //     for com in commands {
-                //         self.execute(com)?;
-                //     }
+                if let KeyCode::Char('q') = key_event.code { self.close(w)? };
+                match InputHandler::parse_normal(key_event) {
+                    Some(action) => self.buf.apply(action).unwrap_or_else(|e| self.status = e.to_string()),
+                    None => (),
                 }
+                self.update_cursor(w)?;
+                self.update_highlights();
+                self.draw(w, self.buf.row())?
             }
-            EditMode::Insert => match key_event.code {
-                KeyCode::Char(c) => {
-                    let mut tmp = [0u8; 4];
-                    self.insert(w, self.buf.idx, c.encode_utf8(&mut tmp))?;
-                    self.move_cursor(Movement::Right(1))?;
+            EditMode::Insert => {
+                match InputHandler::parse_insert(key_event) {
+                    Some(action) => self.buf.apply(action).unwrap_or_else(|e| self.status = e.to_string()),
+                    None => (),
                 }
-                KeyCode::Esc => {
-                    self.set_mode(w, EditMode::Normal)?;
-                    self.move_cursor(Movement::Left(1))?;
-                }
-                KeyCode::Up => self.move_cursor(Movement::Up(1))?,
-                KeyCode::Down => self.move_cursor(Movement::Down(1))?,
-                KeyCode::Left => self.move_cursor(Movement::Left(1))?,
-                KeyCode::Right => self.move_cursor(Movement::Right(1))?,
-                KeyCode::Home => self.move_cursor(Movement::Home)?,
-                KeyCode::End => self.move_cursor(Movement::End)?,
-                KeyCode::PageUp => {
-                    self.move_cursor(Movement::Up(*self.rect.height as usize / 2))?
-                }
-                KeyCode::PageDown => {
-                    self.move_cursor(Movement::Down(*self.rect.height as usize / 2))?
-                }
-                KeyCode::Backspace => {
-                    self.remove(w, self.buf.idx.saturating_sub(1).into()..self.buf.idx)?
-                }
-                KeyCode::Delete => self.remove(w, self.buf.idx..(self.buf.idx + 1.into()))?,
-                KeyCode::Tab => self.insert(w, self.buf.idx, "\t")?,
-                KeyCode::Enter => {
-                    self.insert(w, self.buf.idx, "\n")?;
-                    self.move_cursor(Movement::Down(1))?;
-                    self.move_cursor(Movement::Home)?;
-                }
-                _ => (),
-            },
+                self.update_cursor(w)?;
+                self.update_highlights();
+                self.draw(w, self.buf.row())?
+            }
             EditMode::Command => {
                 match key_event.code {
                     KeyCode::Char(c) => self.status.push(c),
                     KeyCode::Backspace => {
                         self.status.pop();
                         if self.status.is_empty() {
-                            self.set_mode(w, EditMode::Normal)?;
+                            self.buf.apply(Action::SetMode(EditMode::Normal));
                         }
                     }
-                    KeyCode::Esc => self.set_mode(w, EditMode::Normal)?,
+                    KeyCode::Esc => self.buf.apply(Action::SetMode(EditMode::Normal)).unwrap_or_else(|e| self.status = e.to_string()),
                     KeyCode::Enter => {
-                        self.set_mode(w, EditMode::Normal)?;
+                        self.buf.apply(Action::SetMode(EditMode::Normal));
                         match self.status.as_str() {
                             ":w" => self.save()?,
                             ":q" => {
-                                if !self.edited {
-                                    self.quit(w)?
+                                if !self.buf.edited {
+                                    self.close(w)?
                                 } else {
                                     self.status = String::from("Error: No write since last change. To quit without saving, use ':q!'")
                                 }
                             }
-                            ":q!" => self.quit(w)?,
+                            ":q!" => self.close(w)?,
                             ":wq" | ":x" => {
                                 self.save()?;
-                                self.quit(w)?;
+                                self.close(w)?;
                             }
                             "r" => self.draw_all(w)?,
                             _ => self.status = format!("Error: invalid command ({})", self.status),

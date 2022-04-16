@@ -8,6 +8,34 @@ pub struct BufCharIdx(pub usize);
 #[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
 pub struct BufByteIdx(pub usize);
 
+#[derive(Clone, Copy, Default, From)]
+pub struct BufRange {
+    pub start: BufCharIdx,
+    pub end: BufCharIdx
+}
+
+impl BufRange {
+    pub fn new(start: BufCharIdx, end: BufCharIdx) -> Self {
+        if *end < *start {
+            Self { start: end, end: start }
+        } else {
+            Self { start, end }
+        }
+    }
+}
+
+impl From<BufRange> for Range<usize> {
+    fn from(range: BufRange) -> Self {
+        *range.start..*range.end
+    }
+}
+
+impl From<Range<BufCharIdx>> for BufRange {
+    fn from(range: Range<BufCharIdx>) -> Self {
+        Self::new(range.start, range.end)
+    }
+}
+
 #[derive(Clone, Copy, Default, From, Deref, Add, Sub)]
 pub struct BufCol(pub usize);
 
@@ -84,6 +112,16 @@ pub enum Movement {
 }
 
 impl Movement {
+    pub fn is_horizontal(&self) -> bool {
+        match self {
+            Movement::Up(_) => false,
+            Movement::Down(_) => false,
+            Movement::Top => false,
+            Movement::Bottom => false,
+            _ => true,
+        }
+    }
+
     pub fn dest(&self, buf: &Buffer) -> BufCharIdx {
         match &self {
             Movement::Up(amount) => {
@@ -126,6 +164,7 @@ impl Movement {
 
 #[derive(Clone, Copy)]
 pub enum Selection {
+    Bounds(BufCharIdx, BufCharIdx),
     Lines(usize),
     UpTo(Movement),
     Between {
@@ -143,8 +182,9 @@ pub enum Selection {
 }
 
 impl Selection {
-    pub fn bounds(&self, buf: &Buffer) -> Range<BufCharIdx> {
+    pub fn bounds(&self, buf: &Buffer) -> BufRange {
         match self {
+            Selection::Bounds(start, end) => *start..*end,
             Selection::Lines(amount) => {
                 let start = buf.line_to_char(buf.row());
                 let dest = usize::min(*buf.row() + amount, buf.text.len_lines()).into();
@@ -160,7 +200,7 @@ impl Selection {
             } => BufCharIdx(0)..BufCharIdx(0),
             Selection::Word { inclusive: _ } => BufCharIdx(0)..BufCharIdx(0), // TODO: implement
             Selection::Paragraph { inclusive: _ } => BufCharIdx(0)..BufCharIdx(0), // TODO: implement
-        }
+        }.into()
     }
 }
 
