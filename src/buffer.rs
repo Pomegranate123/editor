@@ -1,5 +1,5 @@
 use crate::{
-    action::Action,
+    action::{BufferAction, Action, Undoable},
     utils::{BufByteIdx, BufCharIdx, BufCol, BufPos, BufRow, BufRange},
 };
 use ropey::{Rope, RopeSlice};
@@ -14,7 +14,6 @@ use std::{
 pub enum EditMode {
     Normal,
     Insert,
-    Command,
 }
 
 impl Default for EditMode {
@@ -37,8 +36,8 @@ pub struct Buffer {
     pub edited: bool,
     /// The path of the file being edited
     pub path: PathBuf,
-    pub undo: Vec<Action>,
-    pub redo: Vec<Action>,
+    pub undo: Vec<BufferAction>,
+    pub redo: Vec<BufferAction>,
 }
 
 impl Buffer {
@@ -54,17 +53,17 @@ impl Buffer {
 
     /// Returns which row the cursor is on
     pub fn row(&self) -> BufRow {
-        self.char_to_line(self.idx)
+        self.char_to_row(self.idx)
     }
 
     /// Returns which column the cursor is on
     pub fn col(&self) -> BufCol {
-        (*self.idx - *self.line_to_char(self.row())).into()
+        self.char_to_col(self.idx)
     }
 
-    /// Returns the column of the last character in a given line
-    pub fn max_col(&self, line: BufRow) -> BufCol {
-        self.text.line(*line).len_chars().saturating_sub(1).into()
+    /// Returns the column of the last character in a given row
+    pub fn max_col(&self, row: BufRow) -> BufCol {
+        self.text.line(*row).len_chars().saturating_sub(1).into()
     }
 
     pub fn insert(&mut self, i: BufCharIdx, string: &str) {
@@ -81,20 +80,28 @@ impl Buffer {
         BufPos::new(self.col(), self.row())
     }
 
-    pub fn char_to_line(&self, character: BufCharIdx) -> BufRow {
+    pub fn char_to_col(&self, character: BufCharIdx) -> BufCol {
+        (*character - *self.row_to_char(self.char_to_row(character))).into()
+    }
+
+    pub fn char_to_row(&self, character: BufCharIdx) -> BufRow {
         self.text.char_to_line(*character).into()
     }
 
-    pub fn line_to_char(&self, line: BufRow) -> BufCharIdx {
-        self.text.line_to_char(*line).into()
+    pub fn char_to_pos(&self, character: BufCharIdx) -> BufPos {
+        BufPos::new(self.char_to_col(character), self.char_to_row(character))
+    }
+
+    pub fn row_to_char(&self, row: BufRow) -> BufCharIdx {
+        self.text.line_to_char(*row).into()
     }
 
     pub fn byte_to_char(&self, byte: BufByteIdx) -> BufCharIdx {
         self.text.byte_to_char(*byte).into()
     }
 
-    pub fn line_to_byte(&self, line: BufRow) -> BufByteIdx {
-        self.text.line_to_byte(*line).into()
+    pub fn row_to_byte(&self, row: BufRow) -> BufByteIdx {
+        self.text.line_to_byte(*row).into()
     }
 
     pub fn slice(&self, range: BufRange) -> RopeSlice<'_> {
@@ -106,6 +113,7 @@ impl Buffer {
         self.saved_col = self.col();
     }
 
+    #[allow(unused)]
     /// Saves the current state of the buffer to the file
     pub fn write(&mut self) {
         self.text
@@ -117,9 +125,11 @@ impl Buffer {
         self.edited = false;
     }
 
-    pub fn apply(&mut self, action: Action) -> Result<(), &'static str> {
-        self.redo.clear();
-        self.undo.push(action.inverse(self));
+    pub fn apply(&mut self, action: BufferAction) -> Result<(), &'static str>{
+        if let BufferAction::Delete(_) | BufferAction::Insert(_) | BufferAction::InsertAt(_, _) = action {
+            self.redo.clear();
+            self.undo.push(action.inverse(self));
+        }
         action.apply(self)
     }
 }

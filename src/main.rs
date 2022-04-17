@@ -1,8 +1,8 @@
-use crate::{config::Config, render::BufferRenderer};
+use crate::{config::Config, window::Window};
 use crossterm::{
     cursor::{RestorePosition, SavePosition},
     event,
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{self, DisableLineWrap, EnableLineWrap, EnterAlternateScreen, LeaveAlternateScreen},
     Result,
@@ -17,10 +17,12 @@ use std::{
 mod action;
 mod buffer;
 mod config;
+mod highlight;
 mod input;
 mod rect;
 mod render;
 mod utils;
+mod window;
 
 fn main() {
     let config_path = PathBuf::from(match env::var("XDG_CONFIG_HOME") {
@@ -55,9 +57,9 @@ impl Drop for CleanUp {
 }
 
 struct Editor {
-    buffers: Vec<BufferRenderer>,
+    windows: Vec<Window>,
     _config: Config,
-    current_buffer: usize,
+    selected_window: usize,
     width: u16,
     height: u16,
 }
@@ -66,9 +68,9 @@ impl Editor {
     pub fn new(path: PathBuf, config: Config) -> Self {
         let (width, height) = terminal::size().unwrap();
         Editor {
-            buffers: vec![BufferRenderer::new(path, config.clone())],
+            windows: vec![Window::new(path, config.clone())],
             _config: config,
-            current_buffer: 0,
+            selected_window: 0,
             width,
             height,
         }
@@ -83,15 +85,14 @@ impl Editor {
             EnableMouseCapture,
             DisableLineWrap,
         )?;
-        self.buffer_mut().draw_all(w)?;
+        self.buffer_mut().draw_all()?;
         loop {
             let input = event::read()?;
-            if let Event::Key(event) = input {
-                if event.code == KeyCode::Char('c') && event.modifiers == KeyModifiers::CONTROL {
-                    self.quit(w)?;
-                }
+            if let Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL }) = input {
+                self.quit(w)?;
+            } else {
+                self.handle_input(input)?;
             }
-            self.handle_input(w, input)?;
         }
     }
 
@@ -101,25 +102,24 @@ impl Editor {
         self.height = height;
     }
 
-    pub fn buffer_mut(&mut self) -> &mut BufferRenderer {
-        self.buffers
-            .get_mut(self.current_buffer)
-            .expect("BufferRenderer index was out of range for editor")
+    pub fn buffer_mut(&mut self) -> &mut Window {
+        self.windows
+            .get_mut(self.selected_window)
+            .expect("Window index was out of range for editor")
     }
 
-    pub fn handle_input<W: Write>(&mut self, w: &mut W, event: Event) -> Result<()> {
+    pub fn handle_input(&mut self, event: Event) -> Result<()> {
         match event {
             Event::Resize(width, height) => {
                 self.update_size(width, height);
-                self.buffer_mut().draw_all(w)?;
+                self.buffer_mut().draw_all()?;
             }
-            Event::Key(event) => self.buffer_mut().handle_keyevent(w, event)?,
+            Event::Key(event) => self.buffer_mut().handle_keyevent(event)?,
             Event::Mouse(_event) => (),
         }
         Ok(())
     }
 
-    #[allow(unused)]
     /// Cleans up and quits the application
     fn quit<W: Write>(&mut self, w: &mut W) -> Result<()> {
         execute!(

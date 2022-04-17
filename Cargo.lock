@@ -42,12 +42,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4361135be9122e0870de935d7c439aef945b9f9ddd4199a553b5270b49c82a27"
 
 [[package]]
-name = "arrayvec"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8da52d66c7071e2e3fa2a1e5c6d088fec47b593032b254f5e980de8ea54454d6"
-
-[[package]]
 name = "atty"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -250,7 +244,6 @@ dependencies = [
  "tree-sitter-highlight",
  "tree-sitter-rust",
  "tree-sitter-toml",
- "undo",
 ]
 
 [[package]]
@@ -1096,16 +1089,6 @@ dependencies = [
  "nom",
  "parking_lot 0.10.2",
  "petgraph",
-]
-
-[[package]]
-name = "undo"
-version = "0.47.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbacbd10e3f9be8521b11081af39250ff06bc210a93b18cb241440c82ef90de2"
-dependencies = [
- "arrayvec",
- "serde",
 ]
 
 [[package]]

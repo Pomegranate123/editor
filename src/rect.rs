@@ -13,11 +13,11 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub fn new(width: TermCol, height: TermRow, x: TermCol, y: TermRow) -> Self {
+    pub fn new(width: impl Into<TermCol>, height: impl Into<TermRow>, x: impl Into<TermCol>, y: impl Into<TermRow>) -> Self {
         Self {
-            width,
-            height,
-            offset: TermPos::new(x, y),
+            width: width.into(),
+            height: height.into(),
+            offset: TermPos::new(x.into(), y.into()),
             scroll: BufPos::default(),
         }
     }
@@ -27,7 +27,9 @@ impl Rect {
         self.height = height;
     }
 
-    pub fn scroll_to_cursor(&mut self, cursor: BufPos) {
+    /// Scrolls to make sure the cursor is visible, and returns the amount that was scrolled vertically
+    pub fn scroll_to_cursor(&mut self, cursor: BufPos) -> isize {
+        let old_scroll_y = *self.scroll.y as isize;
         // Scroll left if cursor is on left side of bounds
         if cursor.x.saturating_sub(*self.scroll.x) < MARGIN_LEFT {
             self.scroll.x = cursor.x.saturating_sub(MARGIN_LEFT).into();
@@ -48,6 +50,7 @@ impl Rect {
                 .saturating_sub(*self.height as usize)
                 .into();
         }
+        *self.scroll.y as isize - old_scroll_y
     }
 
     #[allow(unused)]

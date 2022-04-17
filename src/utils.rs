@@ -91,11 +91,12 @@ pub struct TermPos {
 }
 
 impl TermPos {
-    pub fn new(x: TermCol, y: TermRow) -> Self {
-        Self { x, y }
+    pub fn new(x: impl Into<TermCol>, y: impl Into<TermRow>) -> Self {
+        Self { x: x.into(), y: y.into() }
     }
 }
 
+#[allow(unused)]
 #[derive(Clone, Copy)]
 pub enum Movement {
     Up(usize),
@@ -127,26 +128,26 @@ impl Movement {
             Movement::Up(amount) => {
                 let y = buf.row().saturating_sub(*amount).into();
                 let x = usize::min(*buf.max_col(y), *buf.saved_col).into();
-                buf.line_to_char(y) + x
+                buf.row_to_char(y) + x
             }
             Movement::Down(amount) => {
                 let y =
                     usize::min(*buf.row() + amount, buf.text.len_lines().saturating_sub(1)).into();
                 let x = usize::min(*buf.max_col(y), *buf.saved_col).into();
-                buf.line_to_char(y) + x
+                buf.row_to_char(y) + x
             }
             Movement::Left(amount) => usize::max(
                 buf.idx.saturating_sub(*amount),
-                *buf.line_to_char(buf.row()),
+                *buf.row_to_char(buf.row()),
             )
             .into(),
             Movement::Right(amount) => usize::min(
                 *buf.idx + amount,
-                *buf.line_to_char(buf.row()) + *buf.max_col(buf.row()),
+                *buf.row_to_char(buf.row()) + *buf.max_col(buf.row()),
             )
             .into(),
-            Movement::Home => buf.line_to_char(buf.row()),
-            Movement::End => buf.line_to_char(buf.row() + BufRow(1)) - BufCharIdx(1),
+            Movement::Home => buf.row_to_char(buf.row()),
+            Movement::End => buf.row_to_char(buf.row() + BufRow(1)) - BufCharIdx(1),
             Movement::FirstChar => {
                 unimplemented!()
             }
@@ -162,6 +163,7 @@ impl Movement {
     }
 }
 
+#[allow(unused)]
 #[derive(Clone, Copy)]
 pub enum Selection {
     Bounds(BufCharIdx, BufCharIdx),
@@ -186,9 +188,9 @@ impl Selection {
         match self {
             Selection::Bounds(start, end) => *start..*end,
             Selection::Lines(amount) => {
-                let start = buf.line_to_char(buf.row());
+                let start = buf.row_to_char(buf.row());
                 let dest = usize::min(*buf.row() + amount, buf.text.len_lines()).into();
-                let end = buf.line_to_char(dest);
+                let end = buf.row_to_char(dest);
                 start..end
             }
             Selection::UpTo(mov) => buf.idx..mov.dest(buf),

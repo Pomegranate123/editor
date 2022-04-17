@@ -1,15 +1,24 @@
 use crossterm::style::{self, ContentStyle};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
-use tree_sitter_highlight::HighlightConfiguration;
+
+#[derive(Clone, Debug)]
+pub struct HighlightStyles {
+    pub types: Vec<String>,
+    pub styles: Vec<ContentStyle>,
+}
+
+impl HighlightStyles {
+    pub fn new(types: Vec<String>, styles: Vec<ContentStyle>) -> Self {
+        Self { types, styles }
+    }
+}
 
 #[derive(Clone)]
 pub struct Config {
     pub line_nr_active: ContentStyle,
     pub line_nr_column: ContentStyle,
-    pub hl_types: Vec<String>,
-    pub hl_styles: Vec<ContentStyle>,
+    pub hl: HighlightStyles,
 }
 
 impl Config {
@@ -40,35 +49,9 @@ impl From<SerDeConfig> for Config {
         Config {
             line_nr_active: c.line_nr_active.into(),
             line_nr_column: c.line_nr_column.into(),
-            hl_types: c.hl.keys().cloned().collect(),
-            hl_styles: c.hl.into_values().map(ContentStyle::from).collect(),
+            hl: HighlightStyles::new(c.hl.keys().cloned().collect(), c.hl.into_values().map(ContentStyle::from).collect()),
         }
     }
-}
-
-pub fn get_hl_conf(path: &Path) -> Option<HighlightConfiguration> {
-    let hl_conf = match path.extension() {
-        None => return None,
-        Some(extension) => match extension.to_str().unwrap() {
-            "rs" => HighlightConfiguration::new(
-                tree_sitter_rust::language(),
-                tree_sitter_rust::HIGHLIGHT_QUERY,
-                "",
-                "",
-            )
-            .unwrap(),
-            "toml" => HighlightConfiguration::new(
-                tree_sitter_toml::language(),
-                tree_sitter_toml::HIGHLIGHT_QUERY,
-                "",
-                "",
-            )
-            .unwrap(),
-            _ => return None,
-        },
-    };
-
-    Some(hl_conf)
 }
 
 #[derive(Serialize, Deserialize)]
